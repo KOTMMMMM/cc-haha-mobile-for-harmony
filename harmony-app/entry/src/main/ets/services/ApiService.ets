@@ -120,7 +120,7 @@ export class ApiService {
     try {
       const options: http.HttpRequestOptions = {
         method: http.RequestMethod.GET,
-        header: { 'User-Agent': 'ClaudeHaha-Mobile/1.0.0' },
+        header: { 'User-Agent': 'cc-haha-mobile/1.0.0' },
         expectDataType: http.HttpDataType.STRING,
         connectTimeout: 3500,
         readTimeout: 3500
@@ -425,7 +425,7 @@ export class ApiService {
     const url = this.baseUrl + path;
     const reqHeader: Record<string, string> = {
       'Content-Type': 'application/json',
-      'User-Agent': 'ClaudeHaha-Mobile/1.0.0'
+      'User-Agent': 'cc-haha-mobile/1.0.0'
     };
     if (withAuth && this.token) { reqHeader['Authorization'] = 'Bearer ' + this.token; }
     const options: http.HttpRequestOptions = {

@@ -19,7 +19,7 @@ import { emptyTailscaleStatus, TailscaleRequest, TailscaleStatus } from '../mode
 
 const DOMAIN: number = 0x0001;
 const TAG: string = 'TailscaleVpn';
-const BUNDLE_NAME: string = 'com.claudehaha.mobile';
+const BUNDLE_NAME: string = 'com.cchaha.harmony';
 const DEFAULT_CONTROL_URL: string = 'https://controlplane.tailscale.com';
 const VPN_EXISTS_ERROR_CODE: number = 2203002;
 const STATUS_POLL_MS: number = 1000;

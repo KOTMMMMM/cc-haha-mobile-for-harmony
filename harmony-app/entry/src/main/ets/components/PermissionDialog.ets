@@ -17,7 +17,7 @@ export struct ToolPermissionDialog {
     Column() {
       Text('权限请求').fontSize(18).fontWeight(FontWeight.Bold).fontColor('#333').margin({ top: 20, bottom: 12 })
       Text('(!)').fontSize(40).margin({ bottom: 12 })
-      Text('Claude 想要执行:').fontSize(14).fontColor('#666').margin({ bottom: 4 })
+      Text('cc-haha 想要执行:').fontSize(14).fontColor('#666').margin({ bottom: 4 })
       Text(this.request ? this.getDisplayName(this.request.toolName) : '')
         .fontSize(16).fontWeight(FontWeight.Bold).fontColor('#1677FF').margin({ bottom: 12 })
 

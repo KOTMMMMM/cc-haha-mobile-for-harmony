@@ -1,9 +1,9 @@
 {
   "string": [
-    { "name": "module_desc", "value": "Claude Code Haha 鸿蒙客户端" },
+    { "name": "module_desc", "value": "cc-haha 鸿蒙客户端" },
     { "name": "EntryAbility_desc", "value": "AI编程助手" },
-    { "name": "EntryAbility_label", "value": "Claude Haha" },
-    { "name": "app_name", "value": "Claude Haha" },
+    { "name": "EntryAbility_label", "value": "cc-haha" },
+    { "name": "app_name", "value": "cc-haha" },
     { "name": "internet_reason", "value": "连接PC端AI服务需要网络访问" },
     { "name": "network_reason", "value": "检测网络连接状态" },
     { "name": "wifi_reason", "value": "局域网发现PC端服务" },

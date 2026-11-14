@@ -17,7 +17,7 @@ export class Constants {
   static readonly WS_PONG_TIMEOUT_MS: number = 20000;
 
   // Preferences
-  static readonly PREFERENCES_NAME: string = 'claude_haha_prefs';
+  static readonly PREFERENCES_NAME: string = 'cc_haha_prefs';
   static readonly KEY_TOKEN: string = 'auth_token';
   static readonly KEY_HOST: string = 'connection_host';
   static readonly KEY_PORT: string = 'connection_port';

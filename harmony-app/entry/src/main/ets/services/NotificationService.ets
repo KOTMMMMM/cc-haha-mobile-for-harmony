@@ -42,7 +42,7 @@ export class NotificationService {
     try {
       if (!(await notificationManager.isNotificationEnabled())) { return; }
       const info: wantAgent.WantAgentInfo = {
-        wants: [{ bundleName: 'com.claudehaha.mobile', abilityName: 'EntryAbility' }],
+        wants: [{ bundleName: 'com.cchaha.harmony', abilityName: 'EntryAbility' }],
         actionType: wantAgent.OperationType.START_ABILITY,
         requestCode: 0,
         actionFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]

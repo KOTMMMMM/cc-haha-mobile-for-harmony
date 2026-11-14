@@ -386,7 +386,7 @@ export struct ChatPage {
         if (t && t.length > 0) { return t; }
       }
     }
-    return 'Claude Haha';
+    return 'cc-haha';
   }
 
   private lastAssistantSnippet(): string {

@@ -7,7 +7,7 @@ import { emptyTailscaleStatus, TailscaleRequest, TailscaleStatus } from '../mode
 import { Constants } from '../utils/Constants';
 import { Logger } from '../utils/Logger';
 
-const BUNDLE_NAME: string = 'com.claudehaha.mobile';
+const BUNDLE_NAME: string = 'com.cchaha.harmony';
 const ABILITY_NAME: string = 'TailscaleVpnExtensionAbility';
 const MODULE_NAME: string = 'entry';
 const CONTROL_URL: string = 'https://controlplane.tailscale.com';

@@ -4,7 +4,7 @@
 export enum LogLevel { DEBUG = 0, INFO = 1, WARN = 2, ERROR = 3 }
 
 export class Logger {
-  private static TAG: string = 'ClaudeHaha';
+  private static TAG: string = 'cc-haha';
   private static level: LogLevel = LogLevel.DEBUG;
 
   static setLevel(level: LogLevel): void { Logger.level = level; }
