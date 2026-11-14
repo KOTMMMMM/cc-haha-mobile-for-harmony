@@ -8,12 +8,17 @@ export type WsEventHandler = (event: Record<string, Object>) => void;
 
 interface WsControlMessage { type: string; }
 
+interface WsHandlerEntry {
+  cb: WsEventHandler;
+  owner: string;
+}
+
 /**
  * 新版 cc-haha WebSocket：每会话一条连接 /ws/<sessionId>?token=<h5Token>
  */
 export class WebSocketService {
   private ws: webSocket.WebSocket | null = null;
-  private handlers: Map<string, WsEventHandler[]> = new Map();
+  private handlers: Map<string, WsHandlerEntry[]> = new Map();
   private isConnected: boolean = false;
   private connectionState: string = 'disconnected';
   private host: string = '';
@@ -135,9 +140,9 @@ export class WebSocketService {
         const eventType = msg.type as string;
         if (eventType === 'pong') { this.pendingPingAt = 0; }
         const cbs = this.handlers.get(eventType);
-        if (cbs) { cbs.forEach(cb => cb(msg)); }
+        if (cbs) { cbs.forEach(entry => entry.cb(msg)); }
         const allCbs = this.handlers.get('*');
-        if (allCbs) { allCbs.forEach(cb => cb(msg)); }
+        if (allCbs) { allCbs.forEach(entry => entry.cb(msg)); }
       } catch (e) {
         Logger.warn('Failed to parse WS message');
       }
@@ -274,21 +279,46 @@ export class WebSocketService {
     }
   }
 
-  on(event: string, callback: WsEventHandler): void {
+  on(event: string, callback: WsEventHandler, owner: string = ''): void {
     const cbs = this.handlers.get(event) || [];
-    cbs.push(callback);
+    cbs.push({ cb: callback, owner: owner });
     this.handlers.set(event, cbs);
   }
 
   off(event: string, callback: WsEventHandler): void {
     const cbs = this.handlers.get(event);
     if (cbs) {
-      const idx = cbs.indexOf(callback);
-      if (idx >= 0) { cbs.splice(idx, 1); }
+      const kept = cbs.filter(entry => entry.cb !== callback);
+      if (kept.length > 0) { this.handlers.set(event, kept); }
+      else { this.handlers.delete(event); }
     }
   }
 
-  clearHandlers(): void { this.handlers.clear(); }
+  /** 不传 owner 时清空所有；传 owner 时只清理该页面/模块的处理器，避免误伤后台监听。 */
+  clearHandlers(owner?: string): void {
+    if (owner === undefined) {
+      this.handlers.clear();
+      return;
+    }
+    const keys: string[] = [];
+    this.handlers.forEach((_value: WsHandlerEntry[], key: string) => { keys.push(key); });
+    for (const key of keys) {
+      const list = this.handlers.get(key) || [];
+      const kept = list.filter(entry => entry.owner !== owner);
+      if (kept.length > 0) { this.handlers.set(key, kept); }
+      else { this.handlers.delete(key); }
+    }
+  }
+
+  offConnectionChanged(cb: (connected: boolean) => void): void {
+    const idx = this.connectionChangedCallbacks.indexOf(cb);
+    if (idx >= 0) { this.connectionChangedCallbacks.splice(idx, 1); }
+  }
+
+  offConnectionStateChange(cb: (state: string) => void): void {
+    const idx = this.stateChangeCallbacks.indexOf(cb);
+    if (idx >= 0) { this.stateChangeCallbacks.splice(idx, 1); }
+  }
 
   private notifyConnectionChanged(): void {
     this.connectionChangedCallbacks.forEach(cb => cb(this.isConnected));

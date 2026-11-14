@@ -57,6 +57,9 @@ export default class TailscaleVpnExtensionAbility extends VpnExtensionAbility {
   private status: TailscaleStatus = emptyTailscaleStatus();
   private netConnection?: connection.NetConnection;
   private networkNotifyAt: number = 0;
+  // backend 尚未 ready 时先缓存，进入 Running 后再补发网络变更
+  private pendingNetworkName: string = '';
+  private lastNetworkFlushAt: number = 0;
 
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, 'VPN extension created');
@@ -134,17 +137,32 @@ export default class TailscaleVpnExtensionAbility extends VpnExtensionAbility {
         if (!name) {
           return;
         }
-        tsNetworkChanged(name).then((reply: string): void => {
-          hilog.info(DOMAIN, TAG, 'network changed (%{public}s) via %{public}s -> %{public}s',
-            reason, name, reply);
-        }).catch((error: Error): void => {
-          hilog.warn(DOMAIN, TAG, 'network change notify failed: %{public}s', error.message);
-        });
+        this.pendingNetworkName = name;
+        hilog.info(DOMAIN, TAG, 'network changed (%{public}s) via %{public}s',
+          reason, name);
+        this.flushNetworkChanged();
       }).catch((error: Error): void => {
         hilog.warn(DOMAIN, TAG, 'network properties failed: %{public}s', error.message);
       });
     }).catch((error: Error): void => {
       hilog.warn(DOMAIN, TAG, 'default net failed: %{public}s', error.message);
+    });
+  }
+
+  /** 把最近一次网络接口变化通知给 Go 后端；失败时保留，Running 后继续重试。 */
+  private flushNetworkChanged(): void {
+    if (!this.pendingNetworkName) { return; }
+    const now: number = Date.now();
+    if (now - this.lastNetworkFlushAt < 3000) { return; }
+    this.lastNetworkFlushAt = now;
+    const name: string = this.pendingNetworkName;
+    tsNetworkChanged(name).then((reply: string): void => {
+      hilog.info(DOMAIN, TAG, 'network changed via %{public}s -> %{public}s', name, reply);
+      if (!reply.startsWith('FAILED')) {
+        this.pendingNetworkName = '';
+      }
+    }).catch((error: Error): void => {
+      hilog.warn(DOMAIN, TAG, 'network change notify failed: %{public}s', error.message);
     });
   }
 
@@ -429,11 +447,14 @@ export default class TailscaleVpnExtensionAbility extends VpnExtensionAbility {
       parts.length > 2 ? parts[2] : '', 0);
     hilog.info(DOMAIN, TAG, 'Tailscale running, self=%{public}s', parts[0]);
 
+    // 进入 Running 前可能已经发生过 Wi-Fi/蜂窝切换，这里补发最近一次接口名
+    this.flushNetworkChanged();
     while (!this.stopping) {
       if (this.stopRequested()) {
         break;
       }
       // 外部 TUN 运行后 TSBackendStatus 可能阻塞；心跳不依赖它。
+      this.flushNetworkChanged();
       this.writeHeartbeat();
       await sleep(STATUS_POLL_MS);
     }

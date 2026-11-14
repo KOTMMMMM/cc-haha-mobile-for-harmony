@@ -27,6 +27,11 @@ export class TailscaleVpnService {
   private lastStartAt: number = 0;
   private bootstrapped: boolean = false;
   private ready: Promise<void> = Promise.resolve();
+  // 心跳过期时自动重启扩展，指数退避避免抖动
+  private restartAttempts: number = 0;
+  private lastRestartAt: number = 0;
+  private readonly RESTART_BASE_MS: number = 2000;
+  private readonly RESTART_MAX_MS: number = 30000;
 
   initialize(context: common.UIAbilityContext): Promise<void> {
     this.context = context;
@@ -61,12 +66,23 @@ export class TailscaleVpnService {
     await this.setPreference(KEY_AUTO_CONNECT, on);
     this.enabled = on;
     this.autoConnect = on;
+    this.restartAttempts = 0;
+    this.lastRestartAt = 0;
     AppStorage.setOrCreate('tailscaleAutoConnect', on);
     if (on) {
       await this.startExtension();
     } else {
       await this.stopExtension();
     }
+  }
+
+  /** 设置页「重启」：跳过退避，立即停掉并重新拉起扩展 */
+  async restart(): Promise<void> {
+    await this.ready;
+    this.restartAttempts = 0;
+    this.lastRestartAt = 0;
+    this.bootstrapped = true;
+    await this.forceRestart();
   }
 
   async ensureConnected(): Promise<void> {
@@ -171,10 +187,47 @@ export class TailscaleVpnService {
     }
   }
 
+  /** 停掉无响应的扩展进程后重新拉起；由 applyStatus 的 stale 检测或设置页手动触发。 */
+  private async forceRestart(): Promise<void> {
+    if (!this.context || this.startInFlight) {
+      return;
+    }
+    this.startInFlight = true;
+    this.lastRestartAt = Date.now();
+    const want: Want = {
+      bundleName: BUNDLE_NAME,
+      moduleName: MODULE_NAME,
+      abilityName: ABILITY_NAME
+    };
+    try {
+      try {
+        await vpnExtension.stopVpnExtensionAbility(want);
+      } catch (error) {
+        Logger.debug('[TS] stop before restart ignored: ' + (error as Error).message);
+      }
+      await this.sleep(400);
+      this.ensureRuntimeDir();
+      this.writeRequest('start');
+      await vpnExtension.startVpnExtensionAbility(want);
+      Logger.info('[TS] extension restart requested attempt=' + this.restartAttempts);
+      AppStorage.setOrCreate('tailscaleState', 'starting');
+      AppStorage.setOrCreate('tailscaleDetail', 'Tailscale 无响应，正在重启');
+      AppStorage.setOrCreate('tailscaleRunning', false);
+      this.startPolling();
+    } catch (error) {
+      const code: number = (error as BusinessError).code ?? -1;
+      Logger.warn('[TS] restart extension failed code=' + code + ' ' + (error as Error).message);
+    } finally {
+      this.startInFlight = false;
+    }
+  }
+
   private async stopExtension(): Promise<void> {
     if (!this.context) {
       return;
     }
+    this.restartAttempts = 0;
+    this.lastRestartAt = 0;
     this.ensureRuntimeDir();
     this.writeRequest('stop');
     const deadline: number = Date.now() + 3000;
@@ -223,6 +276,18 @@ export class TailscaleVpnService {
     AppStorage.setOrCreate('tailscaleError', status.errorCode);
     const running: boolean = state === 'running';
     AppStorage.setOrCreate('tailscaleRunning', running);
+    if (running) {
+      this.restartAttempts = 0;
+    } else if (stale && this.autoConnect && !this.startInFlight &&
+      AppStorage.get<boolean>('appForeground') === true) {
+      const delay: number = Math.min(
+        this.RESTART_BASE_MS * Math.pow(2, Math.min(this.restartAttempts, 4)),
+        this.RESTART_MAX_MS);
+      if (Date.now() - this.lastRestartAt >= delay) {
+        this.restartAttempts++;
+        this.forceRestart();
+      }
+    }
     if (running && !this.lastRunning) {
       const foreground: boolean = AppStorage.get<boolean>('appForeground') === true;
       if (foreground) {

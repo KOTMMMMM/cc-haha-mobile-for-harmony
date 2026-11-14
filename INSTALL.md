@@ -20,12 +20,15 @@
 
 ## 方式 B：命令行签名（本仓库脚本）
 
-准备签名材料（示例路径）：
+签名材料不要放在仓库内。默认查找顺序：
+
+1. 仓库内 `signing/`（兼容旧布局）
+2. 用户目录 `~/.cc-haha-signing/`（推荐）
 
 ```
-signing/cchaha_debug.p12
-signing/cchaha_debug.cer
-signing/cchaha_debug_profile.p7b
+~/.cc-haha-signing/cchaha_debug.p12
+~/.cc-haha-signing/cchaha_debug.cer
+~/.cc-haha-signing/cchaha_debug_profile.p7b
 ```
 
 运行：
@@ -35,17 +38,31 @@ KEY_PWD='你的keystore密码' STORE_PWD='你的keystore密码' \
   tools/build-sign-install.sh
 ```
 
-脚本会依次执行 hvigor 构建、`hap-sign-tool` 签名、`hdc install -r`。只想构建和签名时加 `SKIP_INSTALL=1`。
+脚本会先校验 `entry/libs/arm64-v8a/SHA256SUMS`，再执行 hvigor 构建、`hap-sign-tool` 签名、`hdc install -r`。只想构建和签名时加 `SKIP_INSTALL=1`。
 
 可选环境变量：
 
 | 变量 | 说明 |
 |---|---|
 | `DEVECO_HOME` | DevEco Studio 安装目录 |
-| `KEYSTORE` / `CERT` / `PROFILE` | 签名材料路径 |
+| `SIGNING_DIR` | 签名材料目录，默认 `signing/` 或 `~/.cc-haha-signing` |
+| `KEYSTORE` / `CERT` / `PROFILE` | 单独覆盖签名材料路径 |
 | `KEY_ALIAS` | keystore 别名，默认 `cchaha_debug` |
 | `COMPAT_VERSION` | 与 `compatibleSdkVersion` 一致，默认 `23` |
 | `HDC` | hdc 可执行文件路径 |
+
+### 新包名 `com.cchaha.harmony` 的签名
+
+现有 `cchaha_debug_profile.p7b` 绑定的包名是 `com.claudehaha.mobile`，**不能**给 `com.cchaha.harmony` 签名（设备会报 `9568329 verify signature failed`）。新包名需要用 DevEco 自动签名重新生成 profile：
+
+1. 用 DevEco Studio 打开 `harmony-app`，登录华为账号。
+2. **File → Project Structure → Signing Configs**。
+3. 勾选「自动生成签名文件」，选择团队，点击「应用」→「确定」。
+4. 在 DevEco 中 Run，或执行 `hvigor assembleHap`。
+
+自动签名会生成 `~/.ohos/config/default_harmony-app_*.{cer,p7b,p12}`，并把带本机路径的配置写入 `harmony-app/build-profile.json5`。**不要把这份本机配置提交到仓库**；本仓库的 `build-profile.json5` 保持 `signingConfigs: []`。
+
+本机备份（不提交）：`~/.cc-haha-build-profile.local-signing.json5`。需要在本机重建 1.0.1 时，可临时复制回 `harmony-app/build-profile.json5`，构建后再恢复。
 
 ## 方式 C：小白安装器
 
@@ -75,12 +92,20 @@ KEY_PWD='你的keystore密码' STORE_PWD='你的keystore密码' \
 
 登录态会持久化；冷启动、停止/重开都不需要重新登录。
 
+### 升级 / 重装注意
+
+- `hdc install -r` 覆盖安装会保留 App 沙箱数据，通常不需要重新登录 Tailscale。
+- **卸载会删除** `files/tailscale/control-<hash>/tailscaled.state`，需要重新登录。
+- 从旧包名（`com.claudehaha.mobile`）升级到新包名（`com.cchaha.harmony`）属于全新安装，设置与 Tailscale 登录态不会迁移。
+- 更换 Tailscale 引擎大版本后也可能要求重新登录；升级前建议先记录当前状态。
+
 ## 常见问题
 
 | 现象 | 处理 |
 |---|---|
 | `Invalid URL format` / 一直显示缓存 | 确认手机当前网络能访问 PC；等 Tailscale running 后会自动重试 |
 | 创建 VPN 失败 `2203002` | 系统里已有其他 VPN（如 ClashBox），先断开再开启内置 Tailscale |
+| Tailscale 状态「无响应」 | 扩展心跳过期会自动重启（2/4/8/16/30s 退避）；也可在设置页点「重启」 |
 | 扫码后连不上 | 二维码里的地址可能只在局域网可用；补充 Tailscale 备用地址，或在家/外网分别测试 |
 | 安装提示签名不一致 | 需要卸载旧包或使用同一份签名材料；卸载会清除 App 数据 |
 | 设备锁屏导致安装失败 | 保持屏幕解锁后重试 |

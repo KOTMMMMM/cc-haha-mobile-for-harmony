@@ -24,14 +24,16 @@ struct Index {
   @StorageLink('pcActiveHost') pcHostname: string = '';
   @StorageLink('tailscaleState') tailscaleState: string = 'idle';
   private healthTimer: number = -1;
+  // 固定引用，页面重建时才能从全局 WS 上注销，避免回调累积
+  private readonly connectionStateListener: (state: string) => void = (state: string): void => {
+    this.connectionState = state;
+  };
 
   aboutToAppear(): void {
     Logger.info('Index page appeared');
     if (this.wsService) {
       this.connectionState = this.wsService.getConnectionState();
-      this.wsService.onConnectionStateChange((state: string) => {
-        this.connectionState = state;
-      });
+      this.wsService.onConnectionStateChange(this.connectionStateListener);
     }
     this.checkAuth();
     this.startHealthMonitor();
@@ -41,6 +43,9 @@ struct Index {
     if (this.healthTimer >= 0) {
       clearInterval(this.healthTimer);
       this.healthTimer = -1;
+    }
+    if (this.wsService) {
+      this.wsService.offConnectionStateChange(this.connectionStateListener);
     }
   }
 

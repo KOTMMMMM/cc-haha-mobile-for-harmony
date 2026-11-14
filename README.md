@@ -16,7 +16,7 @@ harmony-app/            HarmonyOS 应用（ArkTS + NAPI）
   entry/src/main/ets/   页面、组件、服务
   entry/src/main/cpp/   libtailscale_ohos_bridge NAPI 桥
   entry/libs/arm64-v8a/ 预编译 libtailscale_go.so（Git LFS）
-pc-bridge/              PC 端桥接/协议参考实现（TypeScript）
+docs/legacy/pc-bridge/  已废弃的独立桥接参考实现（旧协议，不参与构建）
 tools/                  构建 + 签名 + 安装脚本
 INSTALL.md              安装、配对与常见问题
 HANDOVER.md             开发/真机测试记录
@@ -43,7 +43,7 @@ KEY_PWD='<keystore密码>' STORE_PWD='<keystore密码>' tools/build-sign-install
 
 1. 先在 Windows / macOS / Android 设备上按工具说明部署“小白调试助手”（首次需要非鸿蒙设备）。
 2. 手机开启开发者模式；如工具要求，同时打开 USB 调试。
-3. 打开小白调试助手，选择 Release 中的 `cc-haha-mobile-1.0.0-unsigned.hap`。
+3. 打开小白调试助手，选择 Release 中的 `cc-haha-mobile-1.0.1-unsigned.hap`。
 4. 按工具提示完成签名/安装。不同版本的界面和按钮可能不同，以工具内说明为准。
 5. 安装完成后打开 App，按 [INSTALL.md](INSTALL.md) 完成配对。
 
@@ -55,8 +55,11 @@ KEY_PWD='<keystore密码>' STORE_PWD='<keystore密码>' tools/build-sign-install
 ## 安全与发布注意
 
 - `signing/`、`test-artifacts/`、构建产物、备份目录均已加入 `.gitignore`，不要强制添加。
+- 推荐把签名材料放在仓库外 `~/.cc-haha-signing/`；脚本会自动回退到该目录。
 - 签名密码只通过 `KEY_PWD`/`STORE_PWD` 环境变量传入。
+- 启用提交前密钥扫描：`git config core.hooksPath .githooks`（CI 也会运行 `tools/check-secrets.sh`）。
 - 预签名 HAP 不适合公开分发（调试 profile 仅对登记设备有效）。
+- 当前包名为 `com.cchaha.harmony`。旧的 `cchaha_debug_profile.p7b` 绑定 `com.claudehaha.mobile`，新包名需用 DevEco 自动签名重新生成 profile；不要提交带本机路径的 `build-profile.json5`。
 - 内置 Tailscale 属于 VPN 能力，公开分发/上架前需评估合规要求。
 - 本仓库原创代码采用 MIT 许可证；随包分发的第三方组件仍按其各自许可证（见 `THIRD_PARTY_NOTICES.md`）。
 

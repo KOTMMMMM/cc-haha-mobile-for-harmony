@@ -1,0 +1,35 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Unit tests (pure history logic)
+        run: |
+          cd tools/unit-tests
+          npm install --no-audit --no-fund
+          npm test
+
+      - name: Secret scan
+        run: bash tools/check-secrets.sh
+
+      - name: Shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck tools/*.sh
+
+      - name: Git LFS integrity
+        run: git lfs fsck

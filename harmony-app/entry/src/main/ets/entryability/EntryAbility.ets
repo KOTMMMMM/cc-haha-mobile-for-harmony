@@ -9,6 +9,7 @@ import { AuthService } from '../services/AuthService';
 import { HistoryStore } from '../services/HistoryStore';
 import { NotificationService } from '../services/NotificationService';
 import { BackgroundTaskService } from '../services/BackgroundTaskService';
+import { BackgroundTurnWatcher } from '../services/BackgroundTurnWatcher';
 import { TailscaleVpnService } from '../services/TailscaleVpnService';
 import { Logger } from '../utils/Logger';
 
@@ -24,6 +25,8 @@ export default class EntryAbility extends UIAbility {
     notificationService.initialize(this.context);
     const backgroundTaskService = new BackgroundTaskService();
     backgroundTaskService.initialize(this.context);
+    const backgroundTurnWatcher = new BackgroundTurnWatcher(
+      apiService, notificationService, authService, backgroundTaskService);
     const tailscaleService = new TailscaleVpnService();
     tailscaleService.initialize(this.context);
     authService.initialize(this.context);
@@ -39,6 +42,7 @@ export default class EntryAbility extends UIAbility {
     AppStorage.setOrCreate('historyStore', historyStore);
     AppStorage.setOrCreate('notificationService', notificationService);
     AppStorage.setOrCreate('backgroundTaskService', backgroundTaskService);
+    AppStorage.setOrCreate('backgroundTurnWatcher', backgroundTurnWatcher);
     AppStorage.setOrCreate('tailscaleService', tailscaleService);
     AppStorage.setOrCreate('tailscaleState', 'idle');
     AppStorage.setOrCreate('tailscaleDetail', '');

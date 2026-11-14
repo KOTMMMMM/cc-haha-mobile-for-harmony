@@ -5,9 +5,6 @@ export class Constants {
   // Network defaults (新版 cc-haha 内置服务端)
   static readonly DEFAULT_PORT: number = 65499;
   static readonly DEFAULT_WS_PORT: number = 65499;
-  static readonly DISCOVERY_PORT: number = 3458;
-  static readonly DISCOVERY_TIMEOUT_MS: number = 10000;
-  static readonly PAIR_CODE_LENGTH: number = 6;
   static readonly WS_PATH: string = '/ws/';
 
   // Reconnection（不再限次数：Tailscale 断线/切网/后台冻结后都能自动恢复）
@@ -33,15 +30,7 @@ export class Constants {
   static readonly KEY_CURRENT_SESSION_ID: string = 'current_session_id';
 
   // App info
-  static readonly APP_VERSION: string = '1.0.0';
-
-  // API endpoints
-  static readonly API_HEALTH: string = '/health';
-  static readonly API_PAIR_REQUEST: string = '/api/pair/request';
-  static readonly API_PAIR_VERIFY: string = '/api/pair/verify';
-  static readonly API_SESSIONS: string = '/api/sessions';
-  static readonly API_PROVIDERS: string = '/api/providers';
-  static readonly API_FILES: string = '/api/files';
+  static readonly APP_VERSION: string = '1.0.1';
 }
 
 export class Colors {

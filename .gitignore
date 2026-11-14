@@ -9,7 +9,7 @@ signing/
 # 构建产物与缓存
 harmony-app/**/build/
 harmony-app/.hvigor/
-harmony-app/oh_modules/
+**/oh_modules/
 **/.cxx/
 **/.preview/
 *.hap
@@ -39,3 +39,7 @@ _backup_*/
 *.log
 .DS_Store
 Thumbs.db
+
+# 本地测试依赖
+node_modules/
+tools/unit-tests/node_modules/

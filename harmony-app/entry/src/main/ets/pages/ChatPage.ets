@@ -1,25 +1,27 @@
-import {
-  MessageModel, MessageRole, ContentType, TextContent, ThinkingContent, ToolUseContent
-} from '../models/Message';
+import { MessageModel, MessageRole, ContentType, ToolUseContent } from '../models/Message';
 import { MessageList } from '../components/MessageList';
 import { InputBar } from '../components/InputBar';
 import { ComposerToolbar } from '../components/ComposerToolbar';
 import { ToolPermissionDialog, PermissionRequest } from '../components/PermissionDialog';
-import { WebSocketService, WsEvent } from '../services/WebSocketService';
+import { WebSocketService, WsEvent, WsEventHandler } from '../services/WebSocketService';
 import { ApiService } from '../services/ApiService';
 import { SessionService } from '../services/SessionService';
 import { HistoryStore } from '../services/HistoryStore';
 import { AuthService } from '../services/AuthService';
 import { NotificationService } from '../services/NotificationService';
 import { BackgroundTaskService } from '../services/BackgroundTaskService';
+import { BackgroundTurnWatcher } from '../services/BackgroundTurnWatcher';
 import { AttachmentItem } from '../models/Attachment';
+import {
+  contentToText, mergeMessages, parseServerMessages, lastAssistantSnippet
+} from '../services/chat/ChatHistoryUtils';
 import { promptAction } from '@kit.ArkUI';
 import router from '@ohos.router';
 import { Logger } from '../utils/Logger';
 
 interface WsAttachment { type: string; name: string; data: string; mimeType: string; }
 interface WsUserMessage { type: string; content: string; attachments?: WsAttachment[]; }
-interface WsPermissionResponse { type: string; requestId: string; allowed: boolean; }
+interface WsPermissionResponse { type: string; requestId: string; allowed: boolean; remember?: boolean; }
 interface WsStopMessage { type: string; }
 
 @Component
@@ -31,7 +33,7 @@ export struct ChatPage {
   @StorageLink('authService') authService: AuthService = new AuthService();
   @StorageLink('notificationService') notificationService: NotificationService = new NotificationService();
   @StorageLink('backgroundTaskService') bgTaskService: BackgroundTaskService = new BackgroundTaskService();
-  @StorageLink('appForeground') appForeground: boolean = true;
+  @StorageLink('appForeground') @Watch('onAppForegroundChanged') appForeground: boolean = true;
   @StorageLink('activeSessionId') @Watch('onActiveSessionChanged') activeSessionId: string = '';
   @StorageLink('chatRefresh') @Watch('onRefreshChanged') chatRefresh: number = 0;
   @StorageLink('invalidSessionId') @Watch('onInvalidSessionChanged') invalidSessionId: string = '';
@@ -44,15 +46,24 @@ export struct ChatPage {
   private historyHasMore: boolean = false;
   private permissionDialogController: CustomDialogController | null = null;
   private pendingPermissionRequest: PermissionRequest | null = null;
+  private permissionDialogVisible: boolean = false;
+  private permissionTimer: number = -1;
+  private readonly PERMISSION_TIMEOUT_MS: number = 60000;
   private currentTurnAssistantId: string = '';
   private pendingResync: boolean = false;
   private turnNotified: boolean = false;
   private pageActive: boolean = true;
+  // 每个页面实例独立的处理器 owner：切换会话/重建页面时只清自己的监听
+  private readonly wsOwner: string = 'chat-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
   private sendAt: number = 0;
   private firstEventLogged: boolean = false;
   private lastHistoryErrorAt: number = 0;
   // 每次进入/切换会话递增，迟到的本地读取或网络结果直接丢弃
   private historyToken: number = 0;
+  // 流式 delta 合并刷新，避免每个 token 都复制数组并重绘整棵列表
+  private syncTimer: number = -1;
+  private syncPending: boolean = false;
+  private readonly SYNC_THROTTLE_MS: number = 50;
 
   aboutToAppear(): void {
     this.pageActive = true;
@@ -86,10 +97,21 @@ export struct ChatPage {
 
   aboutToDisappear(): void {
     this.pageActive = false;
-    // 非生成中退出时移除页面事件处理器，避免旧页面继续改 UI；
-    // 生成中保留处理器，让回复完成通知仍能触发（服务端会继续跑完这一轮）。
-    if (!this.isGenerating) {
-      this.wsService.clearHandlers();
+    this.cancelScheduledSync();
+    // 离开页面时结束未决权限请求，避免服务端一直等待
+    this.clearPermissionTimer();
+    this.permissionDialogVisible = false;
+    if (this.pendingPermissionRequest) {
+      const requestId = this.pendingPermissionRequest.toolCallId;
+      if (this.permissionDialogController) { this.permissionDialogController.close(); }
+      this.sendPermissionDecision(requestId, false, false);
+    }
+    // 生成中退出时把会话交给后台 watcher，随后释放主 WS；
+    // 非生成中直接移除本页面的处理器，避免旧页面继续改 UI。
+    if (this.isGenerating) {
+      this.handoffToBackgroundWatcher();
+    } else {
+      this.wsService.clearHandlers(this.wsOwner);
     }
     // 返回列表时立即刷新，避免标题/消息数/时间停留在旧值
     AppStorage.setOrCreate('sessionsRefresh', Date.now());
@@ -97,6 +119,7 @@ export struct ChatPage {
 
   onActiveSessionChanged(): void {
     Logger.info('ChatPage active session changed: ' + this.activeSessionId);
+    this.cancelScheduledSync();
     this.currentTurnAssistantId = '';
     this.isGenerating = false;
     this.pendingResync = false;
@@ -130,9 +153,16 @@ export struct ChatPage {
     AppStorage.setOrCreate('invalidSessionId', '');
     this.invalidSessionId = '';
     if (sid !== this.activeSessionId) { return; }
+    const watcher: BackgroundTurnWatcher | null = this.getBgWatcher();
+    if (watcher) { watcher.stop(sid); }
+    this.cancelScheduledSync();
+    this.clearPermissionTimer();
+    this.pendingPermissionRequest = null;
+    this.permissionDialogVisible = false;
+    if (this.permissionDialogController) { this.permissionDialogController.close(); }
     this.isGenerating = false;
     this.wsService.disconnect();
-    this.wsService.clearHandlers();
+    this.wsService.clearHandlers(this.wsOwner);
     this.sessionService.setCurrentSessionId('');
     this.authService.setCurrentSessionId('');
     AppStorage.setOrCreate('activeSessionId', '');
@@ -165,7 +195,11 @@ export struct ChatPage {
   private async connectActiveSession(): Promise<void> {
     const sid = this.activeSessionId;
     const token = this.historyToken;
+    // 重新进入同一会话时取消后台 watcher，避免重复通知
+    const watcher: BackgroundTurnWatcher | null = this.getBgWatcher();
+    if (watcher && sid) { watcher.stop(sid); }
     if (!sid) {
+      this.cancelScheduledSync();
       this.wsService.disconnect();
       this.sessionService.setMessages([]);
       this.syncMessages();
@@ -200,7 +234,7 @@ export struct ChatPage {
     AppStorage.setOrCreate('pcReachable', true);
     this.sessionService.setCurrentSessionId(sid);
     this.wsService.disconnect();
-    this.wsService.clearHandlers();
+    this.wsService.clearHandlers(this.wsOwner);
     this.setupWebSocketHandlers();
     this.wsService.connect(chosenHost, config.port, config.token, sid, origin).catch((e: Error) => {
       // WS 失败可能意味着切网/地址失效，让下次重连前重新探测
@@ -211,12 +245,49 @@ export struct ChatPage {
     this.fetchLatestHistory(sid);
   }
 
+  /** 使用页面实例的 owner 注册，避免误清其他页面/后台监听 */
+  private onWs(event: string, cb: WsEventHandler): void {
+    this.wsService.on(event, cb, this.wsOwner);
+  }
+
+  private getBgWatcher(): BackgroundTurnWatcher | null {
+    return AppStorage.get<BackgroundTurnWatcher>('backgroundTurnWatcher') ?? null;
+  }
+
+  /** 离开生成中的会话：watcher 用独立 WS 等待完成，避免切换会话后通知丢失。 */
+  private handoffToBackgroundWatcher(): void {
+    const sid: string = this.activeSessionId;
+    const watcher: BackgroundTurnWatcher | null = this.getBgWatcher();
+    if (!sid || !watcher) {
+      this.wsService.clearHandlers(this.wsOwner);
+      return;
+    }
+    const title: string = AppStorage.get<string>('activeSessionTitle') ?? '';
+    this.authService.getConnectionConfig().then((config) => {
+      if (this.pageActive) { return; }
+      if (!config) {
+        this.wsService.clearHandlers(this.wsOwner);
+        return;
+      }
+      const host: string = this.apiService.getCurrentHost() || config.host;
+      watcher.start(sid, title, host, config.port, config.token);
+      // 只在主 WS 仍指向该会话时断开，避免误伤刚打开的新聊天页
+      if (this.wsService.getSessionId() === sid) {
+        this.wsService.disconnect();
+      }
+      this.wsService.clearHandlers(this.wsOwner);
+    }).catch((error: Error) => {
+      Logger.warn('handoff watcher failed: ' + error.message);
+      this.wsService.clearHandlers(this.wsOwner);
+    });
+  }
+
   private setupWebSocketHandlers(): void {
     if (!this.wsService) { return; }
-    // 页面可能被重建/多次进入，先清空旧处理器，避免同一个 delta 被追加多次
-    this.wsService.clearHandlers();
+    // 页面可能被重建/多次进入，先清空本页面的旧处理器，避免同一个 delta 被追加多次
+    this.wsService.clearHandlers(this.wsOwner);
 
-    this.wsService.on('session_state', (event: WsEvent) => {
+    this.onWs('session_state', (event: WsEvent) => {
       const turnState = event.turnState as string;
       this.isGenerating = turnState === 'running';
       if (turnState === 'running') {
@@ -225,14 +296,14 @@ export struct ChatPage {
       }
     });
 
-    this.wsService.on('status', (event: WsEvent) => {
+    this.onWs('status', (event: WsEvent) => {
       const state = event.state as string;
       this.isGenerating = state !== 'idle';
       if (state === 'idle') { this.finalizeTurn(); }
       else { this.logFirstEvent('status'); }
     });
 
-    this.wsService.on('content_start', (event: WsEvent) => {
+    this.onWs('content_start', (event: WsEvent) => {
       const blockType = event.blockType as string;
       this.logFirstEvent('content_start');
       const msg = this.ensureAssistantMessage();
@@ -245,18 +316,18 @@ export struct ChatPage {
       this.syncMessages();
     });
 
-    this.wsService.on('content_delta', (event: WsEvent) => {
+    this.onWs('content_delta', (event: WsEvent) => {
       const text = event.text as string;
       if (text) {
         this.logFirstEvent('content_delta');
         const msg = this.ensureAssistantMessage();
         msg.appendText(text);
-        this.syncMessages();
+        this.scheduleSync();
       }
       // toolInput 片段忽略，tool_use_complete 会带完整 input
     });
 
-    this.wsService.on('tool_use_complete', (event: WsEvent) => {
+    this.onWs('tool_use_complete', (event: WsEvent) => {
       const msg = this.ensureAssistantMessage();
       const toolUseId = (event.toolUseId as string) ?? '';
       const toolName = (event.toolName as string) ?? '';
@@ -265,9 +336,9 @@ export struct ChatPage {
       this.syncMessages();
     });
 
-    this.wsService.on('tool_result', (event: WsEvent) => {
+    this.onWs('tool_result', (event: WsEvent) => {
       const toolUseId = (event.toolUseId as string) ?? '';
-      const output = this.contentToText(event.content);
+      const output = contentToText(event.content);
       const isError = (event.isError as boolean) ?? false;
       for (const m of this.sessionService.getMessages()) {
         m.updateToolResult(toolUseId, output, isError);
@@ -275,19 +346,25 @@ export struct ChatPage {
       this.syncMessages();
     });
 
-    this.wsService.on('thinking', (event: WsEvent) => {
+    this.onWs('thinking', (event: WsEvent) => {
       const text = event.text as string;
       if (text) {
         this.logFirstEvent('thinking');
         const msg = this.ensureAssistantMessage();
         msg.appendThinking(text);
-        this.syncMessages();
+        this.scheduleSync();
       }
     });
 
-    this.wsService.on('permission_request', (event: WsEvent) => {
+    this.onWs('permission_request', (event: WsEvent) => {
+      const requestId = (event.requestId as string) ?? '';
+      // 页面已离开时不再弹窗，直接拒绝避免服务端挂起
+      if (!this.pageActive) {
+        this.sendPermissionDecision(requestId, false, false);
+        return;
+      }
       this.pendingPermissionRequest = {
-        toolCallId: (event.requestId as string) ?? '',
+        toolCallId: requestId,
         toolName: (event.toolName as string) ?? ((event.displayName as string) ?? ''),
         toolInput: (event.input as object) ?? (new Object() as object),
         description: (event.description as string) ?? ''
@@ -295,7 +372,7 @@ export struct ChatPage {
       this.showPermissionDialog();
     });
 
-    this.wsService.on('message_complete', (event: WsEvent) => {
+    this.onWs('message_complete', (event: WsEvent) => {
       const usage = event.usage as Record<string, Object>;
       const last = this.getCurrentAssistant();
       if (last) {
@@ -310,13 +387,13 @@ export struct ChatPage {
       }
       this.isGenerating = false;
       this.currentTurnAssistantId = '';
-      this.syncMessages();
+      this.flushSync();
       this.persistCurrent();
       this.maybeNotifyTurnComplete();
       this.runPendingResync();
     });
 
-    this.wsService.on('error', (event: WsEvent) => {
+    this.onWs('error', (event: WsEvent) => {
       this.isGenerating = false;
       const msg = new MessageModel(MessageRole.SYSTEM);
       msg.appendText((event.message as string) ?? '发生错误，请重试');
@@ -325,7 +402,7 @@ export struct ChatPage {
       this.persistCurrent();
     });
 
-    this.wsService.on('system_notification', (event: WsEvent) => {
+    this.onWs('system_notification', (event: WsEvent) => {
       const subtype = event.subtype as string;
       if (subtype === 'session_state_changed') {
         const data = event.data as Record<string, Object>;
@@ -335,7 +412,7 @@ export struct ChatPage {
       }
     });
 
-    this.wsService.on('session_title_updated', (event: WsEvent) => {
+    this.onWs('session_title_updated', (event: WsEvent) => {
       const title = event.title as string;
       const sid = event.sessionId as string;
       if (title && sid) {
@@ -353,7 +430,7 @@ export struct ChatPage {
     const last = this.getCurrentAssistant();
     if (last && last.isStreaming) { last.finalizeMessage(); }
     this.currentTurnAssistantId = '';
-    this.syncMessages();
+    this.flushSync();
     this.persistCurrent();
     // 一轮结束后刷新列表的消息数/时间
     AppStorage.setOrCreate('sessionsRefresh', Date.now());
@@ -368,7 +445,7 @@ export struct ChatPage {
     try {
       if (!this.appForeground && (await this.authService.getNotifyOnComplete())) {
         const title = this.currentSessionTitle() + ' · 回复完成';
-        const body = this.lastAssistantSnippet();
+        const body = lastAssistantSnippet(this.sessionService.getMessages());
         await this.notificationService.notifyTurnComplete(title, body);
       }
     } catch (e) {
@@ -387,23 +464,6 @@ export struct ChatPage {
       }
     }
     return 'cc-haha';
-  }
-
-  private lastAssistantSnippet(): string {
-    const msgs = this.sessionService.getMessages();
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i].role !== MessageRole.ASSISTANT) { continue; }
-      let text = '';
-      for (const c of msgs[i].contents) {
-        if (c.type === ContentType.TEXT) { text += (c as TextContent).text; }
-      }
-      text = text.trim();
-      if (text.length === 0) { continue; }
-      // 去掉 Markdown 标记与换行，通知里保持一行
-      text = text.replace(/[#*`>_~\-]/g, '').replace(/\s+/g, ' ').trim();
-      return text.length > 120 ? text.substring(0, 120) + '…' : text;
-    }
-    return '回复已完成，点击查看';
   }
 
   /** 断线发生在生成过程中：等这一轮结束后再补拉历史，避免把实时消息对象替换掉 */
@@ -444,31 +504,35 @@ export struct ChatPage {
     block.status = 'running';
   }
 
-  private contentToText(contentObj: Object): string {
-    if (contentObj === undefined || contentObj === null) { return ''; }
-    if (typeof contentObj === 'string') { return contentObj as string; }
-    const arr = contentObj as Record<string, Object>[];
-    if (Array.isArray(arr)) {
-      const parts: string[] = [];
-      for (const b of arr) {
-        const t = b.text as string;
-        if (t) { parts.push(t); continue; }
-        const c = b.content as string;
-        if (c) { parts.push(c); }
-      }
-      return parts.join('\n');
-    }
-    try {
-      return JSON.stringify(contentObj);
-    } catch (e) {
-      Logger.debug('contentToText stringify failed: ' + (e as Error).message);
-      return '';
-    }
-  }
-
   private syncMessages(): void {
     if (!this.pageActive) { return; }
     this.messages = [...this.sessionService.getMessages()];
+  }
+
+  /** 流式 delta 高频到达：合并到 50ms 一次，避免每个 token 都复制数组并重绘列表 */
+  private scheduleSync(): void {
+    if (!this.pageActive) { return; }
+    if (this.syncTimer !== -1) { this.syncPending = true; return; }
+    this.syncMessages();
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = -1;
+      if (this.syncPending) {
+        this.syncPending = false;
+        this.scheduleSync();
+      }
+    }, this.SYNC_THROTTLE_MS);
+  }
+
+  /** 结构性变化（完成/切换会话/离开页面）前立即落地，避免节流窗口内丢更新 */
+  private flushSync(): void {
+    if (this.syncTimer !== -1) { clearTimeout(this.syncTimer); this.syncTimer = -1; }
+    this.syncPending = false;
+    this.syncMessages();
+  }
+
+  private cancelScheduledSync(): void {
+    if (this.syncTimer !== -1) { clearTimeout(this.syncTimer); this.syncTimer = -1; }
+    this.syncPending = false;
   }
 
   /** 本地缓存优先：读取后立刻上屏，不等待网络 */
@@ -498,9 +562,9 @@ export struct ChatPage {
     try {
       const page = await this.apiService.getMessagesPage(sessionId);
       if (!this.pageActive || token !== this.historyToken) { return; }
-      const remote = page.messages.length > 0 ? this.parseServerMessages(page.messages) : [];
+      const remote = page.messages.length > 0 ? parseServerMessages(page.messages) : [];
       const before = this.sessionService.getMessages();
-      const merged = remote.length > 0 ? this.mergeMessages(before, remote) : before;
+      const merged = remote.length > 0 ? mergeMessages(before, remote) : before;
       this.sessionService.setMessages(merged);
       this.syncMessages();
       // 已经向上翻过页时保留原来的游标，避免重连把翻页位置重置到最新
@@ -526,222 +590,6 @@ export struct ChatPage {
     } finally {
       if (this.pageActive && token === this.historyToken) { this.isLoadingHistory = false; }
     }
-  }
-
-  private messageKey(m: MessageModel): string {
-    let text = '';
-    for (const c of m.contents) {
-      if (c.type === ContentType.TEXT) { text += (c as TextContent).text; }
-      else if (c.type === ContentType.THINKING) { text += (c as ThinkingContent).text; }
-      else if (c.type === ContentType.TOOL_USE) {
-        const t = c as ToolUseContent;
-        // 工具调用必须带上唯一 ID，否则同名工具会被误判为重复
-        text += 'tool:' + t.toolName + ':' + t.toolId;
-      }
-    }
-    if (text.length > 0) { return m.role + '|' + text; }
-    return m.role + '|' + Math.floor(m.timestamp / 60000);
-  }
-
-  private mergeMessages(local: MessageModel[], remote: MessageModel[]): MessageModel[] {
-    const merged: MessageModel[] = [];
-    const keys = new Set<string>();
-    let remoteMin = 0;
-    let remoteMax = 0;
-    for (let i = 0; i < remote.length; i++) {
-      const m = remote[i];
-      keys.add(this.messageKey(m));
-      merged.push(m);
-      if (i === 0 || m.timestamp < remoteMin) { remoteMin = m.timestamp; }
-      if (i === 0 || m.timestamp > remoteMax) { remoteMax = m.timestamp; }
-    }
-    for (const m of local) {
-      // 只有与远端页时间窗重叠的消息才可能重复。
-      // 几千条旧消息直接跳过文本比较，避免 O(本地条数 × 远端条数) 的字符串扫描。
-      const nearRemote = remote.length > 0 &&
-        m.timestamp >= remoteMin - 600000 && m.timestamp <= remoteMax + 600000;
-      if (nearRemote) {
-        const k = this.messageKey(m);
-        if (keys.has(k)) { continue; }
-        if (m.role === MessageRole.USER) {
-          // 附件文件名在服务端会被重命名，不能作为去重依据：只比较去掉附件标记后的正文
-          const lt = this.userDisplayText(m);
-          let dup = false;
-          if (lt.length > 0) {
-            for (const r of merged) {
-              if (r.role !== MessageRole.USER) { continue; }
-              if (Math.abs(r.timestamp - m.timestamp) > 600000) { continue; }
-              if (this.userDisplayText(r) === lt) { dup = true; break; }
-            }
-          }
-          if (dup) { continue; }
-        }
-        if (m.role === MessageRole.ASSISTANT) {
-          const lt = this.concatAssistantText(m);
-          // 流式过程中切换会话/刷新会把同一轮拆成「历史前缀 + 实时后缀」多条消息，
-          // 内容上互相包含时按“谁更完整保留谁”去重，避免同一条回复显示两遍。
-          if (lt.length >= 12) {
-            let containedByRemote = false;
-            for (const r of merged) {
-              if (r.role !== MessageRole.ASSISTANT) { continue; }
-              if (Math.abs(r.timestamp - m.timestamp) >= 600000) { continue; }
-              const rt = this.concatAssistantText(r);
-              if (rt.length >= 12 && rt.indexOf(lt) >= 0) {
-                containedByRemote = true;
-                break;
-              }
-            }
-            if (containedByRemote) { continue; }
-            for (let i = merged.length - 1; i >= 0; i--) {
-              const r = merged[i];
-              if (r.role !== MessageRole.ASSISTANT) { continue; }
-              if (Math.abs(r.timestamp - m.timestamp) >= 600000) { continue; }
-              const rt = this.concatAssistantText(r);
-              if (rt.length >= 12 && rt.length < lt.length && lt.indexOf(rt) >= 0) {
-                keys.delete(this.messageKey(r));
-                merged.splice(i, 1);
-              }
-            }
-          }
-        }
-        keys.add(k);
-      }
-      merged.push(m);
-    }
-    merged.sort((a, b) => a.timestamp - b.timestamp);
-    return merged;
-  }
-
-  private concatAssistantText(m: MessageModel): string {
-    let text = '';
-    for (const c of m.contents) {
-      if (c.type === ContentType.TEXT) { text += (c as TextContent).text; }
-    }
-    return text;
-  }
-
-  /** 用户消息去重用的正文：去掉图片/文件附件标记行（文件名不可靠） */
-  private userDisplayText(m: MessageModel): string {
-    let text = '';
-    for (const c of m.contents) {
-      if (c.type === ContentType.TEXT) { text += (c as TextContent).text; }
-    }
-    const lines = text.split('\n');
-    const kept: string[] = [];
-    for (const line of lines) {
-      const t = line.trim();
-      if (t.indexOf('[图片]') === 0 || t.indexOf('[文件]') === 0 || t.indexOf('[Image: source:') === 0) {
-        continue;
-      }
-      kept.push(line);
-    }
-    return kept.join('\n').trim();
-  }
-
-  private parseServerMessages(rawList: Record<string, Object>[]): MessageModel[] {
-    const result: MessageModel[] = [];
-    // 服务端历史把整轮拆成多条记录：assistant(thinking) / assistant(text) / tool_use / tool_result。
-    // 客户端实时流式时一轮只有一条 assistant 消息（回合内不发 message_complete），
-    // 因此历史也必须按“两条 user 记录之间合成一条 assistant”来解析，才能与本地消息去重。
-    let current: MessageModel | null = null;
-
-    for (const raw of rawList) {
-      const type = raw.type as string;
-      const ts = this.parseTime(raw.timestamp as string);
-      if (type === 'user') {
-        const msg = new MessageModel(MessageRole.USER, raw.id as string);
-        msg.timestamp = ts;
-        this.appendContentBlocks(msg, raw.content);
-        result.push(msg);
-        current = null;
-      } else if (type === 'assistant') {
-        if (!current) {
-          current = new MessageModel(MessageRole.ASSISTANT, raw.id as string);
-          current.timestamp = ts;
-          current.model = raw.model as string;
-          result.push(current);
-        }
-        this.appendContentBlocks(current, raw.content);
-        const usage = raw.usage as Record<string, Object>;
-        if (usage && !current.usage) {
-          current.usage = {
-            inputTokens: (usage.input_tokens as number) ?? 0,
-            outputTokens: (usage.output_tokens as number) ?? 0
-          };
-        }
-      } else if (type === 'tool_use') {
-        if (!current) {
-          current = new MessageModel(MessageRole.ASSISTANT);
-          current.timestamp = ts;
-          result.push(current);
-        }
-        const blocks = raw.content as Record<string, Object>[];
-        if (Array.isArray(blocks)) {
-          for (const b of blocks) {
-            if ((b.type as string) === 'tool_use') {
-              current.addToolUse(
-                (b.id as string) ?? '', (b.name as string) ?? '',
-                (b.input as Record<string, Object>) ?? (new Object() as Record<string, Object>)
-              );
-            }
-          }
-        }
-      } else if (type === 'tool_result') {
-        const blocks = raw.content as Record<string, Object>[];
-        if (Array.isArray(blocks)) {
-          for (const b of blocks) {
-            if ((b.type as string) === 'tool_result') {
-              const id = (b.tool_use_id as string) ?? '';
-              const output = this.contentToText(b.content);
-              const isErr = (b.is_error as boolean) ?? false;
-              for (const m of result) { m.updateToolResult(id, output, isErr); }
-            }
-          }
-        }
-      }
-    }
-    return result;
-  }
-
-  private appendContentBlocks(msg: MessageModel, contentObj: Object): void {
-    if (contentObj === undefined || contentObj === null) { return; }
-    if (typeof contentObj === 'string') { msg.appendText(contentObj as string); return; }
-    const blocks = contentObj as Record<string, Object>[];
-    if (!Array.isArray(blocks)) { return; }
-    for (const b of blocks) {
-      const bt = b.type as string;
-      if (bt === 'text') {
-        const t = (b.text as string) ?? '';
-        // 服务端把附件存成 [Image: source: <本地路径>] 文本块；
-        // 还原成与本地发送时一致的「[图片] 文件名」，既隐藏本机路径，也能和本地消息正确去重。
-        if (t.indexOf('[Image: source:') === 0) {
-          const close = t.lastIndexOf(']');
-          const path = close > 0 ? t.substring(0, close) : t;
-          const sep = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
-          let name = sep >= 0 ? path.substring(sep + 1) : 'image';
-          // 服务端上传后会给文件名加 UUID 前缀，显示时去掉
-          if (name.length > 37 && name.charAt(8) === '-' && name.charAt(13) === '-' &&
-              name.charAt(18) === '-' && name.charAt(23) === '-' && name.charAt(36) === '-') {
-            name = name.substring(37);
-          }
-          let hasText = false;
-          for (const c of msg.contents) {
-            if (c.type === ContentType.TEXT && (c as TextContent).text.length > 0) { hasText = true; }
-          }
-          msg.appendText((hasText ? '\n' : '') + '[图片] ' + name);
-          continue;
-        }
-        msg.appendText(t);
-      } else if (bt === 'thinking') {
-        msg.appendThinking((b.thinking as string) ?? (b.text as string) ?? '');
-      }
-    }
-  }
-
-  private parseTime(value: string): number {
-    if (!value) { return Date.now(); }
-    const t = Date.parse(value);
-    return isNaN(t) ? Date.now() : t;
   }
 
   private async persistCurrent(): Promise<void> {
@@ -806,8 +654,8 @@ export struct ChatPage {
       const page = await this.apiService.getMessagesPage(sid, this.oldestCursor);
       if (!this.pageActive) { return; }
       if (page.messages.length > 0) {
-        const older = this.parseServerMessages(page.messages);
-        const merged = this.mergeMessages(this.sessionService.getMessages(), older);
+        const older = parseServerMessages(page.messages);
+        const merged = mergeMessages(this.sessionService.getMessages(), older);
         this.sessionService.setMessages(merged);
         this.syncMessages();
         this.historyStore.saveMessages(sid, merged);
@@ -823,25 +671,59 @@ export struct ChatPage {
   }
 
   private showPermissionDialog(): void {
-    if (!this.pendingPermissionRequest) { return; }
+    if (!this.pageActive || !this.pendingPermissionRequest || this.permissionDialogVisible) { return; }
+    const request = this.pendingPermissionRequest;
     this.permissionDialogController = new CustomDialogController({
       builder: ToolPermissionDialog({
-        request: this.pendingPermissionRequest,
-        onAllow: (requestId: string) => { this.sendPermissionDecision(requestId, true); },
-        onDeny: (requestId: string) => { this.sendPermissionDecision(requestId, false); },
-        onAlwaysAllow: (requestId: string) => { this.sendPermissionDecision(requestId, true); }
+        request: request,
+        onAllow: (requestId: string) => { this.sendPermissionDecision(requestId, true, false); },
+        onDeny: (requestId: string) => { this.sendPermissionDecision(requestId, false, false); },
+        // 服务端若支持 remember，会记住该工具；不支持时等价于允许一次
+        onAlwaysAllow: (requestId: string) => { this.sendPermissionDecision(requestId, true, true); }
       }),
       alignment: DialogAlignment.Bottom,
       customStyle: true,
       autoCancel: false,
       maskColor: 'rgba(0,0,0,0.6)'
     });
+    this.permissionDialogVisible = true;
     this.permissionDialogController.open();
+    this.startPermissionTimer(request.toolCallId);
   }
 
-  private sendPermissionDecision(requestId: string, allowed: boolean): void {
+  private startPermissionTimer(requestId: string): void {
+    this.clearPermissionTimer();
+    this.permissionTimer = setTimeout(() => {
+      this.permissionTimer = -1;
+      if (!this.pendingPermissionRequest || this.pendingPermissionRequest.toolCallId !== requestId) { return; }
+      // 超时自动拒绝，避免服务端一直挂起；用户可在电脑端重新触发
+      this.sendPermissionDecision(requestId, false, false);
+      if (this.permissionDialogController) { this.permissionDialogController.close(); }
+      this.permissionDialogVisible = false;
+      const msg = new MessageModel(MessageRole.SYSTEM);
+      msg.appendText('权限请求超时，已自动拒绝；如需执行请在电脑端确认后重试');
+      this.sessionService.addMessage(msg);
+      this.flushSync();
+    }, this.PERMISSION_TIMEOUT_MS);
+  }
+
+  private clearPermissionTimer(): void {
+    if (this.permissionTimer !== -1) { clearTimeout(this.permissionTimer); this.permissionTimer = -1; }
+  }
+
+  private onAppForegroundChanged(): void {
+    if (this.appForeground && this.pageActive && this.pendingPermissionRequest && !this.permissionDialogVisible) {
+      this.showPermissionDialog();
+    }
+  }
+
+  private sendPermissionDecision(requestId: string, allowed: boolean, remember: boolean): void {
+    this.clearPermissionTimer();
+    this.pendingPermissionRequest = null;
+    this.permissionDialogVisible = false;
     if (!this.wsService || !requestId) { return; }
     const payload: WsPermissionResponse = { type: 'permission_response', requestId: requestId, allowed: allowed };
+    if (remember) { payload.remember = true; }
     this.wsService.send(payload);
   }
 

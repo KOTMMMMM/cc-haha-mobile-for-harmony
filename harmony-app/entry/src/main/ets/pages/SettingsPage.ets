@@ -105,6 +105,17 @@ export struct SettingsContent {
     }
   }
 
+  private async restartTailscale(): Promise<void> {
+    if (this.tailscaleBusy) { return; }
+    this.tailscaleBusy = true;
+    try {
+      await this.tailscaleService.restart();
+      promptAction.showToast({ message: '正在重启 Tailscale 扩展', duration: 1600 });
+    } finally {
+      this.tailscaleBusy = false;
+    }
+  }
+
   private async loginWithAuthKey(): Promise<void> {
     const key: string = this.authKeyInput.trim();
     if (key.length === 0) {
@@ -203,6 +214,33 @@ export struct SettingsContent {
     Logger.warn('[CC] set runtime model -> ' + this.optionModelIds[index]);
   }
 
+  /** 自定义菜单替代系统 Select，便于 uitest 点击，也与聊天页样式一致 */
+  private modelMenu(): MenuElement[] {
+    const items: MenuElement[] = [];
+    if (this.optionLabels.length === 0) {
+      items.push({ value: '加载中…', action: (): void => {} });
+      return items;
+    }
+    for (let i = 0; i < this.optionLabels.length; i++) {
+      items.push({
+        value: (i === this.modelIndex ? '✓ ' : '') + this.optionLabels[i],
+        action: (): void => { this.applyModel(i); }
+      });
+    }
+    return items;
+  }
+
+  private async testNotification(): Promise<void> {
+    const enabled: boolean = await this.notificationService.ensurePermission();
+    if (!enabled) {
+      promptAction.showToast({ message: '通知权限未开启，请先在系统设置中允许', duration: 2200 });
+      return;
+    }
+    await this.notificationService.notifyTurnComplete('Claude Haha · 测试通知',
+      '如果你看到这条通知，说明通知权限正常；手表需在运动健康中开启同步');
+    promptAction.showToast({ message: '已发送测试通知', duration: 1500 });
+  }
+
   async reconnect(): Promise<void> {
     this.isReconnecting = true;
     try {
@@ -294,6 +332,17 @@ export struct SettingsContent {
       ListItem() {
         InfoRowView({ label: '状态', value: this.tailscaleStatusLabel(), isDark: this.theme === 'dark' })
       }
+      if (this.tailscaleAutoConnect) {
+        ListItem() {
+          Row() {
+            Text('扩展无响应时可手动重启').fontSize(12).fontColor('#999').layoutWeight(1)
+            Button('重启').type(ButtonType.Capsule).backgroundColor('#E8F4FF').fontColor('#1677FF')
+              .height(32).enabled(!this.tailscaleBusy)
+              .onClick(() => { this.restartTailscale(); })
+          }.width('100%').padding(14).backgroundColor('#FFFFFF')
+            .border({ width: { bottom: 0.5 }, color: '#F0F0F0' })
+        }
+      }
       if (this.tailscaleSelfIp.length > 0) {
         ListItem() {
           InfoRowView({ label: 'Tailscale IP', value: this.tailscaleSelfIp, isDark: this.theme === 'dark' })
@@ -347,6 +396,17 @@ export struct SettingsContent {
             .onChange((isOn: boolean) => { this.toggleNotify(isOn); })
         }.width('100%').padding(14).backgroundColor('#FFFFFF').border({ width: { bottom: 0.5 }, color: '#F0F0F0' })
       }
+      if (this.notifyEnabled) {
+        ListItem() {
+          Row() {
+            Text('发送测试通知').fontSize(15).fontColor('#333')
+            Blank()
+            Button('测试').type(ButtonType.Capsule).backgroundColor('#E8F4FF').fontColor('#1677FF')
+              .height(30).onClick(() => { this.testNotification(); })
+          }.width('100%').padding(14).backgroundColor('#FFFFFF')
+            .border({ width: { bottom: 0.5 }, color: '#F0F0F0' })
+        }
+      }
 
       ListItem() { Divider().height(8).color(Color.Transparent) }
       ListItem() { this.SectionHeader('模型') }
@@ -355,12 +415,15 @@ export struct SettingsContent {
           Text('模型').fontSize(15).fontColor('#333')
           Blank()
           if (this.modelOptions.length > 0) {
-            Select(this.modelOptions)
-              .selected(this.modelIndex)
-              .value(this.modelLabel)
-              .font({ size: 13 })
-              .fontColor('#1677FF')
-              .onSelect((index: number, value: string) => { this.applyModel(index); })
+            Row() {
+              Text(this.modelLabel).fontSize(13).fontColor('#1677FF').maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .constraintSize({ maxWidth: 180 })
+              Text('▾').fontSize(10).fontColor('#999').margin({ left: 4 })
+            }
+            .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+            .backgroundColor('#E8F4FF').borderRadius(8)
+            .bindMenu(this.modelMenu())
           } else {
             Text('加载中...').fontSize(13).fontColor('#999')
           }

@@ -1,0 +1,11 @@
+{
+  "name": "cc-haha-mobile-unit-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node run-tests.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

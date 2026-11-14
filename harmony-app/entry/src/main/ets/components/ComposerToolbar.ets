@@ -243,8 +243,8 @@ export struct ComposerToolbar {
   }
 
   private contextColor(): string {
-    if (this.contextPercent >= 90) { return '#E54D42'; }
-    if (this.contextPercent >= 75) { return '#FA9D3B'; }
+    if (this.contextPercent >= 85) { return '#E54D42'; }
+    if (this.contextPercent >= 70) { return '#FA9D3B'; }
     return '#8C8C8C';
   }
 
@@ -336,13 +336,17 @@ export struct ComposerToolbar {
             .margin({ right: 6 })
         }
 
-        // 上下文占用
+        // 上下文占用：接近上限时提示新开会话，避免首字延迟和渲染卡顿
         Row() {
           Text(this.contextPercent >= 0 ? '◔ ' + this.contextPercent + '%' : '◔ --')
             .fontSize(11).fontColor(this.contextColor())
+          if (this.contextPercent >= 85) {
+            Text(' · 建议新会话').fontSize(11).fontColor('#E54D42')
+          }
         }
         .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-        .backgroundColor('#F2F2F2').borderRadius(10)
+        .backgroundColor(this.contextPercent >= 85 ? '#FFF1F0' : (this.contextPercent >= 70 ? '#FFF7E6' : '#F2F2F2'))
+        .borderRadius(10)
         .margin({ right: 6 })
         .onClick(() => { this.refreshContext(); })
 

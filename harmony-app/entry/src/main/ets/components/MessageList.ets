@@ -1,6 +1,29 @@
 import { MessageModel, MessageRole, ContentType, TextContent } from '../models/Message';
 import { ChatBubble } from './ChatBubble';
 
+/** LazyForEach 数据源：列表只构建可见项，避免大会话一次性创建全部气泡 */
+class MessageDataSource implements IDataSource {
+  private listeners: DataChangeListener[] = [];
+  private items: MessageModel[] = [];
+
+  totalCount(): number { return this.items.length; }
+  getData(index: number): MessageModel { return this.items[index]; }
+
+  registerDataChangeListener(listener: DataChangeListener): void {
+    if (this.listeners.indexOf(listener) < 0) { this.listeners.push(listener); }
+  }
+
+  unregisterDataChangeListener(listener: DataChangeListener): void {
+    const index = this.listeners.indexOf(listener);
+    if (index >= 0) { this.listeners.splice(index, 1); }
+  }
+
+  setData(items: MessageModel[]): void {
+    this.items = items;
+    for (const listener of this.listeners) { listener.onDataReloaded(); }
+  }
+}
+
 interface TurnInfo {
   startIndex: number;
   endIndex: number;
@@ -34,6 +57,7 @@ export struct MessageList {
   private turnsCache: TurnInfo[] = [];
   private turnIndexByMsg: number[] = [];
   private firstAssistantFlags: boolean[] = [];
+  private dataSource: MessageDataSource = new MessageDataSource();
 
   aboutToAppear(): void {
     this.lastMessageCount = this.messages.length;
@@ -41,12 +65,15 @@ export struct MessageList {
     this.lastLastMessageRevision = this.messages.length > 0 ? this.messages[this.messages.length - 1].revision : 0;
     this.firstMessageId = this.messages.length > 0 ? this.messages[0].id : '';
     this.rebuildTurnCache();
+    this.dataSource.setData(this.messages);
   }
 
   onMessagesChanged(): void {
     const newLastId = this.messages.length > 0 ? this.messages[this.messages.length - 1].id : '';
     const newLastRev = this.messages.length > 0 ? this.messages[this.messages.length - 1].revision : 0;
     const newFirstId = this.messages.length > 0 ? this.messages[0].id : '';
+    const structureChanged = newFirstId !== this.firstMessageId || this.messages.length !== this.lastMessageCount;
+    const revisionChanged = newLastRev !== this.lastLastMessageRevision;
     // 会话切换/前置加载会改变首条消息，重置轮次折叠状态
     if (newFirstId !== this.firstMessageId) { this.collapsedTurns = []; }
     this.firstMessageId = newFirstId;
@@ -61,14 +88,40 @@ export struct MessageList {
         setTimeout(() => { this.scroller.scrollToIndex(lastIndex, false, ScrollAlign.END); }, 600);
         setTimeout(() => { this.scroller.scrollToIndex(lastIndex, false, ScrollAlign.END); }, 1500);
       }
-    } else if (newLastRev !== this.lastLastMessageRevision && !this.showBackToLatest) {
+    } else if (revisionChanged && !this.showBackToLatest) {
       // 同一条消息内流式追加文字：用户没上翻时跟随到底部（节流，避免每个 delta 都触发滚动）
       this.scheduleFollowBottom();
     }
     this.lastMessageCount = this.messages.length;
     this.lastLastMessageId = newLastId;
     this.lastLastMessageRevision = newLastRev;
-    this.rebuildTurnCache();
+    if (structureChanged) {
+      this.rebuildTurnCache();
+    } else if (revisionChanged) {
+      // 流式 delta 只影响最后一轮，无需全量重建 O(n)
+      this.refreshLastTurnStats();
+    }
+    this.dataSource.setData(this.messages);
+  }
+
+  /** 只重算最后一轮的步骤数，供流式/工具结果更新使用 */
+  private refreshLastTurnStats(): void {
+    const turns = this.turnsCache;
+    if (turns.length === 0) { return; }
+    const turn = turns[turns.length - 1];
+    let steps = 0;
+    let firstAssistant = -1;
+    for (let i = turn.startIndex; i < this.messages.length; i++) {
+      if (firstAssistant < 0 && this.messages[i].role === MessageRole.ASSISTANT) { firstAssistant = i; }
+      for (const c of this.messages[i].contents) {
+        if (c.type === ContentType.THINKING || c.type === ContentType.TOOL_USE) { steps++; }
+      }
+    }
+    turn.endIndex = this.messages.length;
+    turn.stepCount = steps;
+    if (firstAssistant >= 0 && firstAssistant < this.firstAssistantFlags.length) {
+      this.firstAssistantFlags[firstAssistant] = true;
+    }
   }
 
   /** 一次遍历重建轮次缓存与每条消息的 O(1) 查询表 */
@@ -255,9 +308,9 @@ export struct MessageList {
                   }
                 }
 
-                ForEach(this.messages, (msg: MessageModel, index: number) => {
+                LazyForEach(this.dataSource, (msg: MessageModel, index: number) => {
                   if (this.isHiddenProcessOnly(msg, index) && !this.isFirstAssistantOfTurn(index)) {
-                    // 折叠状态下纯思考/工具消息不渲染内容，但保留 ListItem 以维持索引与轮次定位
+                    // 折叠状态下纯思考/工具消息不渲染内容；LazyForEach 仍保留占位以维持索引与轮次定位
                     ListItem() {}
                   } else {
                     ListItem() {
