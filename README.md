@@ -252,6 +252,10 @@ git config core.hooksPath .githooks
 - 内置 Tailscale 属于 VPN 能力，公开分发或上架前请自行评估合规要求。
 - 本仓库原创代码采用 MIT 许可证；随包分发的第三方组件保留各自许可证。
 
+## 技术文章
+
+- [把 Tailscale 搬进鸿蒙：从 go-ohos 交叉编译到 VPN 扩展的完整踩坑](docs/blog/2026-11-14-tailscale-ohos-port.md)
+
 ## 贡献
 
 欢迎提交 Issue 和 PR。涉及原生库或连接协议的改动，请先阅读 [docs/toolchain.md](docs/toolchain.md) 并在真机上验证。
