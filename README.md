@@ -39,4 +39,10 @@ KEY_PWD='<keystore密码>' STORE_PWD='<keystore密码>' tools/build-sign-install
 - 签名密码只通过 `KEY_PWD`/`STORE_PWD` 环境变量传入。
 - 预签名 HAP 不适合公开分发（调试 profile 仅对登记设备有效）。
 - 内置 Tailscale 属于 VPN 能力，公开分发/上架前需评估合规要求。
-- 当前许可证未确定；公开前请补充 `LICENSE` 并确认第三方组件署名（见 `THIRD_PARTY_NOTICES.md`）。
+- 本仓库原创代码采用 MIT 许可证；随包分发的第三方组件仍按其各自许可证（见 `THIRD_PARTY_NOTICES.md`）。
+
+## License
+
+MIT © 2026 KOTMMMMM
+
+第三方组件（Tailscale、Go、MeshArc、LLVM libc++ 等）保留其原有许可证，详见 `THIRD_PARTY_NOTICES.md` 与 `licenses/`。
