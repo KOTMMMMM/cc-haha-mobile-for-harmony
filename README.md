@@ -1,5 +1,7 @@
 # cc-haha-mobile for HarmonyOS
 
+<img src="harmony-app/AppScope/resources/base/media/app_icon.png" width="96" alt="cc-haha-mobile icon" />
+
 cc-haha 的 HarmonyOS NEXT 客户端：连接 PC 端 cc-haha 的本地 HTTP/WebSocket 服务，
 在手机上查看会话、接收流式回复、切换模型/权限模式，并可选内置 Tailscale 实现外网访问。
 
