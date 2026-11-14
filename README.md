@@ -33,6 +33,21 @@ KEY_PWD='<keystore密码>' STORE_PWD='<keystore密码>' tools/build-sign-install
 
 调试签名 profile 绑定设备 UDID，换设备需重新生成签名；不要把签名材料提交到仓库。
 
+### 用小白调试助手安装（第三方侧载工具，常称“小白调试工具”）
+
+适合不想安装 DevEco Studio 的用户。工具本身由第三方提供，请从可信来源获取并自行评估风险。
+
+1. 先在 Windows / macOS / Android 设备上按工具说明部署“小白调试助手”（首次需要非鸿蒙设备）。
+2. 手机开启开发者模式；如工具要求，同时打开 USB 调试。
+3. 打开小白调试助手，选择 Release 中的 `cc-haha-mobile-1.0.0-unsigned.hap`。
+4. 按工具提示完成签名/安装。不同版本的界面和按钮可能不同，以工具内说明为准。
+5. 安装完成后打开 App，按 [INSTALL.md](INSTALL.md) 完成配对。
+
+注意：
+- 本仓库提供的是**未签名 HAP**。如果小白调试助手提示签名失败，请改用 DevEco Studio 自动签名，或 `tools/build-sign-install.sh` 自行签名。
+- 调试签名绑定设备 UDID，不能把别人的签名包直接拿来用。
+- Release 附件下载：[latest release](https://github.com/KOTMMMMM/cc-haha-mobile/releases/latest)。
+
 ## 安全与发布注意
 
 - `signing/`、`test-artifacts/`、构建产物、备份目录均已加入 `.gitignore`，不要强制添加。
