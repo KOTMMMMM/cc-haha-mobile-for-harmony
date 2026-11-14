@@ -1,0 +1,21 @@
+{
+  "name": "cc-haha-pc-bridge",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "PC Bridge Server for Claude Code Haha Mobile",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch run src/index.ts"
+  },
+  "dependencies": {
+    "ws": "^8.20.0",
+    "uuid": "^13.0.0",
+    "tree-kill": "^1.2.2"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

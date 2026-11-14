@@ -1,0 +1,26 @@
+#!/bin/bash
+
+# ----------------------------------------------------------------------------
+# Hvigor wrapper script
+# ----------------------------------------------------------------------------
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+HVIGOR_VERSION="5.0.0"
+
+# Locate hvigor installation
+if [ -n "$HVIGOR_HOME" ]; then
+  HVIGOR_DIR="$HVIGOR_HOME"
+elif [ -d "$SCRIPT_DIR/hvigor" ]; then
+  HVIGOR_DIR="$SCRIPT_DIR/hvigor"
+else
+  echo "Error: Hvigor not found. Please install DevEco Studio or set HVIGOR_HOME."
+  exit 1
+fi
+
+# Build command
+HVIGOR_CMD="hvigorw"
+
+# Pass all arguments
+exec node "$HVIGOR_DIR/hvigor-wrapper.js" "$@"

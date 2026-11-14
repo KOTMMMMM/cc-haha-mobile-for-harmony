@@ -1,0 +1,31 @@
+{
+  "string": [
+    { "name": "module_desc", "value": "Claude Code Haha 鸿蒙客户端" },
+    { "name": "EntryAbility_desc", "value": "AI编程助手" },
+    { "name": "EntryAbility_label", "value": "Claude Haha" },
+    { "name": "app_name", "value": "Claude Haha" },
+    { "name": "internet_reason", "value": "连接PC端AI服务需要网络访问" },
+    { "name": "network_reason", "value": "检测网络连接状态" },
+    { "name": "wifi_reason", "value": "局域网发现PC端服务" },
+    { "name": "background_reason", "value": "回复生成期间保持连接，以便完成时通知" },
+    { "name": "tab_chat", "value": "对话" },
+    { "name": "tab_sessions", "value": "会话" },
+    { "name": "tab_files", "value": "文件" },
+    { "name": "tab_settings", "value": "设置" },
+    { "name": "btn_send", "value": "发送" },
+    { "name": "btn_allow", "value": "允许" },
+    { "name": "btn_deny", "value": "拒绝" },
+    { "name": "btn_allow_always", "value": "始终允许" },
+    { "name": "hint_input", "value": "输入消息..." },
+    { "name": "status_connected", "value": "已连接" },
+    { "name": "status_disconnected", "value": "未连接" },
+    { "name": "status_connecting", "value": "连接中..." },
+    { "name": "pairing_title", "value": "连接电脑" },
+    { "name": "pairing_scanning", "value": "正在扫描局域网..." },
+    { "name": "pairing_enter_code", "value": "输入配对码" },
+    { "name": "pairing_manual", "value": "手动输入地址" },
+    { "name": "no_sessions", "value": "暂无会话" },
+    { "name": "new_session", "value": "新建会话" },
+    { "name": "thinking_label", "value": "思考中..." }
+  ]
+}

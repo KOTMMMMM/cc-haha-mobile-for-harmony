@@ -1,0 +1,11 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "Claude Code Haha HarmonyOS Entry Module",
+  "main": "",
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "libtailscale_ohos_bridge.so": "file:./src/main/cpp/types/libtailscale_ohos_bridge"
+  }
+}

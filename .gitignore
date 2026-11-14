@@ -1,0 +1,41 @@
+# 签名与密钥：绝对不要提交
+signing/
+*.p12
+*.p7b
+*.csr
+*.cer
+*.pfx
+
+# 构建产物与缓存
+harmony-app/**/build/
+harmony-app/.hvigor/
+harmony-app/oh_modules/
+**/.cxx/
+**/.preview/
+*.hap
+*.hsp
+*.app
+
+# 本地环境配置
+local.properties
+**/local.properties
+**/hvigor-config.json5.local
+
+# 测试产物（旧会话的 uitest 截图/布局，含真实聊天内容）
+harmony-app/phone_*
+harmony-app/*.jpeg
+harmony-app/*.json
+test-artifacts/
+
+# 备份目录
+_backup_*/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# 日志与临时文件
+*.log
+.DS_Store
+Thumbs.db
