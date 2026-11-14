@@ -1,9 +1,11 @@
-# cc-haha-mobile
+# cc-haha-mobile for HarmonyOS
 
 cc-haha 的 HarmonyOS NEXT 客户端：连接 PC 端 cc-haha 的本地 HTTP/WebSocket 服务，
 在手机上查看会话、接收流式回复、切换模型/权限模式，并可选内置 Tailscale 实现外网访问。
 
 > 私有仓库。运行需要 PC 端配套软件；本仓库不包含完整的 PC 服务端。
+
+> 非官方项目，与 Anthropic、Tailscale Inc. 均无关联或背书关系。
 
 ## 目录结构
 
