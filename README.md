@@ -16,7 +16,7 @@ pc-bridge/              PC 端桥接/协议参考实现（TypeScript）
 tools/                  构建 + 签名 + 安装脚本
 INSTALL.md              安装、配对与常见问题
 HANDOVER.md             开发/真机测试记录
-THIRD_PARTY_NOTICES.md  第三方组件许可
+THIRD_PARTY_NOTICES.md  第三方组件许可（完整文本见 licenses/）
 ```
 
 ## 快速开始
