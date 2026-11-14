@@ -43,3 +43,6 @@ Thumbs.db
 # 本地测试依赖
 node_modules/
 tools/unit-tests/node_modules/
+
+# 维护记录（含本机路径与个人信息，仅本地保留）
+/HANDOVER.md
