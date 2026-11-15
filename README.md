@@ -232,6 +232,7 @@ git config core.hooksPath .githooks
 ```
 
 - 克隆后先 `git lfs install` 和 `git lfs pull`，否则 `libtailscale_go.so` 只是指针文件。
+- 新建或迁移仓库后，如果 CI 在 checkout 阶段报 `failed to fetch some objects ... /info/lfs`，执行 `git lfs push --all origin` 补传 LFS 对象。
 - 原生库只提供 `arm64-v8a`，模拟器（x86_64）无法运行内置 Tailscale。
 - 更换 `libtailscale_go.so` 后需同步更新 `entry/libs/arm64-v8a/SHA256SUMS`。
 - Tailscale 原生库的构建版本、API 24/26 兼容说明见 [docs/toolchain.md](docs/toolchain.md)。
