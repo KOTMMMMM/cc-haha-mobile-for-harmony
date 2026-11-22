@@ -1,5 +1,6 @@
 import { MessageModel, MessageRole, ContentType, TextContent } from '../models/Message';
 import { ChatBubble } from './ChatBubble';
+import { ThemeColors } from '../utils/ThemeUtil';
 
 /** LazyForEach 数据源：列表只构建可见项，避免大会话一次性创建全部气泡 */
 class MessageDataSource implements IDataSource {
@@ -38,6 +39,7 @@ export struct MessageList {
   @Prop isLoading: boolean = false;
   @StorageLink('theme') theme: string = 'light';
   onLoadMore: () => void = () => {};
+  onRetryMessage: (id: string) => void = () => {};
   private scroller: Scroller = new Scroller();
   private lastMessageCount: number = 0;
   private lastFirstIndex: number = 0;
@@ -256,8 +258,8 @@ export struct MessageList {
   }
 
   private markerColor(i: number): string {
-    if (i === this.activeTurnIndex) { return '#1677FF'; }
-    return this.theme === 'dark' ? '#555555' : '#D0D0D0';
+    if (i === this.activeTurnIndex) { return ThemeColors.primary; }
+    return ThemeColors.textTertiary(this.theme);
   }
 
   build() {
@@ -265,14 +267,12 @@ export struct MessageList {
       if (this.messages.length === 0) {
         Column() {
           if (this.isLoading) {
-            LoadingProgress().width(36).height(36).color('#1677FF')
-            Text('正在加载会话…').fontSize(14).fontColor('#999').margin({ top: 12 })
-          } else {
-            Text('开始对话').fontSize(24).fontWeight(FontWeight.Bold).fontColor('#333').margin({ bottom: 8 })
-            Text('向您的 AI 编程助手发送消息').fontSize(14).fontColor('#999')
+            LoadingProgress().width(36).height(36).color(ThemeColors.primary)
           }
         }
-        .width('100%').height('100%').justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
+        .width('100%').height('100%').justifyContent(FlexAlign.Center)
+        .accessibilityLevel('yes')
+        .accessibilityText(this.isLoading ? '正在加载消息' : '暂无消息')
       } else {
         Stack() {
           Row() {
@@ -288,6 +288,8 @@ export struct MessageList {
                   }
                   .width(24).height(14)
                   .justifyContent(FlexAlign.Center)
+                  .accessibilityLevel('yes').accessibilityText('第 ' + (i + 1) + ' 轮')
+                  .id('turn-marker-' + i)
                   .onClick(() => { this.jumpToTurn(i); })
                 }, (turn: TurnInfo, i: number): string => 'turn_' + i)
               }
@@ -301,10 +303,10 @@ export struct MessageList {
                 ListItem() {
                   if (this.isLoading) {
                     Row() {
-                      LoadingProgress().width(20).height(20).color('#999')
-                      Text('加载更多...').fontSize(12).fontColor('#999').margin({ left: 8 })
+                      LoadingProgress().width(20).height(20).color(ThemeColors.textSecondary(this.theme))
                     }
                     .width('100%').justifyContent(FlexAlign.Center).padding({ top: 8, bottom: 8 })
+                    .accessibilityLevel('yes').accessibilityText('正在加载更多')
                   }
                 }
 
@@ -316,12 +318,12 @@ export struct MessageList {
                     ListItem() {
                       ChatBubble({
                         message: msg,
-                        isLast: index === this.messages.length - 1,
                         hideProcess: msg.role === MessageRole.ASSISTANT && this.isTurnCollapsed(this.turnIndexForMessage(index)),
                         showTurnHeader: this.isFirstAssistantOfTurn(index),
                         turnStepCount: this.turnStepCountForMessage(index),
                         turnCollapsed: this.isTurnCollapsed(this.turnIndexForMessage(index)),
-                        onToggleTurn: (): void => { this.toggleTurn(this.turnIndexForMessage(index)); }
+                        onToggleTurn: (): void => { this.toggleTurn(this.turnIndexForMessage(index)); },
+                        onRetryMessage: (id: string): void => { this.onRetryMessage(id); }
                       })
                     }
                     .margin({ top: index === 0 ? 8 : 4 })
@@ -355,14 +357,14 @@ export struct MessageList {
 
               if (this.showBackToLatest) {
                 Row() {
-                  Text('↓').fontSize(14).fontColor('#1677FF').margin({ right: 4 })
-                  Text('回到最新').fontSize(13).fontColor('#1677FF')
+                  Text('↓').fontSize(16).fontColor(ThemeColors.primary)
                 }
-                .padding({ left: 14, right: 14, top: 8, bottom: 8 })
-                .backgroundColor(this.theme === 'dark' ? '#2A2A2A' : '#FFFFFF')
-                .borderRadius(18)
-                .shadow({ radius: 8, color: 'rgba(0,0,0,0.12)', offsetX: 0, offsetY: 2 })
+                .width(44).height(44).justifyContent(FlexAlign.Center)
+                .backgroundColor(ThemeColors.card(this.theme))
+                .borderRadius(22)
+                .shadow({ radius: 8, color: ThemeColors.popupShadow(this.theme), offsetX: 0, offsetY: 2 })
                 .margin({ right: 16, bottom: 12 })
+                .accessibilityLevel('yes').accessibilityText('回到最新消息').id('back-to-latest')
                 .onClick(() => { this.jumpToLatest(); })
               }
             }
@@ -375,17 +377,17 @@ export struct MessageList {
             Column() {
               Text(this.turnPopupTitle)
                 .fontSize(12).fontWeight(FontWeight.Medium)
-                .fontColor(this.theme === 'dark' ? '#DDD' : '#333')
+                .fontColor(ThemeColors.text(this.theme))
               if (this.turnPopupPreview.length > 0) {
                 Text(this.turnPopupPreview)
-                  .fontSize(12).fontColor('#666').maxLines(2)
+                  .fontSize(12).fontColor(ThemeColors.textSecondary(this.theme)).maxLines(2)
                   .textOverflow({ overflow: TextOverflow.Ellipsis }).margin({ top: 4 })
               }
             }
             .width(220).padding(12)
-            .backgroundColor(this.theme === 'dark' ? '#2A2A2A' : '#FFFFFF')
+            .backgroundColor(ThemeColors.card(this.theme))
             .borderRadius(10)
-            .shadow({ radius: 8, color: 'rgba(0,0,0,0.12)', offsetX: 0, offsetY: 2 })
+            .shadow({ radius: 8, color: ThemeColors.popupShadow(this.theme), offsetX: 0, offsetY: 2 })
             .position({ x: 28, y: 96 })
           }
         }

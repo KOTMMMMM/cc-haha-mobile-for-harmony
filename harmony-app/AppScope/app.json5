@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.cchaha.harmony",
     "vendor": "cchaha",
-    "versionCode": 1000001,
-    "versionName": "1.0.1",
+    "versionCode": 1010000,
+    "versionName": "1.1.0",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }

@@ -28,7 +28,7 @@ if (!token) {
 }
 
 const base = `http://${host}:${port}`;
-const headers = { Authorization: `Bearer ${token}`, 'User-Agent': 'cc-haha-smoke/1.0.1' };
+const headers = { Authorization: `Bearer ${token}`, 'User-Agent': 'cc-haha-smoke/1.1.0' };
 
 async function request(path) {
   const res = await fetch(base + path, { headers });

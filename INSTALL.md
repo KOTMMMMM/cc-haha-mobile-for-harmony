@@ -62,7 +62,7 @@ KEY_PWD='你的keystore密码' STORE_PWD='你的keystore密码' \
 
 自动签名会生成 `~/.ohos/config/default_harmony-app_*.{cer,p7b,p12}`，并把带本机路径的配置写入 `harmony-app/build-profile.json5`。**不要把这份本机配置提交到仓库**；本仓库的 `build-profile.json5` 保持 `signingConfigs: []`。
 
-本机备份（不提交）：`~/.cc-haha-build-profile.local-signing.json5`。需要在本机重建 1.0.1 时，可临时复制回 `harmony-app/build-profile.json5`，构建后再恢复。
+本机备份（不提交）：`~/.cc-haha-build-profile.local-signing.json5`。需要在本机重建 1.1.0 时，可临时复制回 `harmony-app/build-profile.json5`，构建后再恢复。
 
 ## 方式 C：小白安装器
 

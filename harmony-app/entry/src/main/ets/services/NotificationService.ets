@@ -1,5 +1,6 @@
 import { notificationManager } from '@kit.NotificationKit';
 import { common, wantAgent } from '@kit.AbilityKit';
+import { image } from '@kit.ImageKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Logger } from '../utils/Logger';
 
@@ -8,9 +9,28 @@ import { Logger } from '../utils/Logger';
  */
 export class NotificationService {
   private context: common.UIAbilityContext | null = null;
+  private appIcon: image.PixelMap | null = null;
 
   initialize(context: common.UIAbilityContext): void {
     this.context = context;
+  }
+
+  /** 通知图标：使用 App 自身的 CC 图标（手表镜像通知时显示的是这个图标） */
+  private async loadAppIcon(): Promise<image.PixelMap | null> {
+    if (this.appIcon) { return this.appIcon; }
+    if (!this.context) { return null; }
+    try {
+      const data = await this.context.resourceManager.getMediaContent($r('app.media.icon').id);
+      const source = image.createImageSource(data.buffer as ArrayBuffer);
+      // 通知图标限制 192KB 像素数据、建议 128x128
+      const pixelMap = await source.createPixelMap({ desiredSize: { width: 128, height: 128 } });
+      await source.release();
+      this.appIcon = pixelMap;
+      return pixelMap;
+    } catch (err) {
+      Logger.warn('load notification icon failed: ' + (err as BusinessError).message);
+      return null;
+    }
   }
 
   /** 首次使用前申请通知授权 */
@@ -48,6 +68,7 @@ export class NotificationService {
         actionFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
       };
       const agent = await wantAgent.getWantAgent(info);
+      const icon = await this.loadAppIcon();
       const request: notificationManager.NotificationRequest = {
         id: 1001,
         notificationSlotType: notificationManager.SlotType.SOCIAL_COMMUNICATION,
@@ -57,6 +78,10 @@ export class NotificationService {
         },
         wantAgent: agent
       };
+      if (icon) {
+        request.smallIcon = icon;
+        request.largeIcon = icon;
+      }
       await notificationManager.publish(request);
     } catch (err) {
       Logger.warn('publish notification failed: ' + (err as BusinessError).message);

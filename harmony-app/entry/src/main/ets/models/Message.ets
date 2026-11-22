@@ -23,12 +23,31 @@ export type ContentBlock = TextContent | ThinkingContent | ToolUseContent | Tool
 
 export interface MsgUsage { inputTokens: number; outputTokens: number; cost?: number; }
 
+/**
+ * 本地发送状态。服务端没有 user_message 的 ACK：
+ * - sending：已交给 WS，等待本轮首个事件确认；
+ * - queued：生成中排队，等当前回合结束后自动发送；
+ * - failed：断线/对账后确认未送达，点按可重试（不会自动重发）；
+ * - sent：已确认；历史消息为空字符串。
+ */
+export enum DeliveryState {
+  NONE = '',
+  SENDING = 'sending',
+  QUEUED = 'queued',
+  FAILED = 'failed',
+  SENT = 'sent'
+}
+
 export class MessageModel {
   id: string;
+  /** 服务端消息 ID（历史消息）；本地乐观消息为空 */
+  serverId: string = '';
   role: MessageRole;
   contents: ContentBlock[];
   timestamp: number;
   isStreaming: boolean;
+  /** 本地发送状态；历史/助手消息通常为空 */
+  delivery: DeliveryState = DeliveryState.NONE;
   /** 内容修订号：每次内容变化 +1，供 ForEach key 触发气泡重建（@Prop 不会感知对象内部变化） */
   revision: number = 0;
   model?: string;
@@ -94,5 +113,12 @@ export class MessageModel {
     this.isStreaming = false;
     if (usage) { this.usage = usage; }
     this.revision++;
+  }
+
+  setDelivery(state: DeliveryState): void {
+    if (this.delivery !== state) {
+      this.delivery = state;
+      this.revision++;
+    }
   }
 }

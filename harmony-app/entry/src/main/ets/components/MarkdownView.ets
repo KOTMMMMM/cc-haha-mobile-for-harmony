@@ -1,3 +1,5 @@
+import { ThemeColors } from '../utils/ThemeUtil';
+
 interface MdInline {
   text: string;
   bold: boolean;
@@ -101,8 +103,9 @@ function parseBlocks(text: string): MdBlock[] {
 
 @Component
 struct MarkdownText {
+  @StorageLink('theme') theme: string = 'light';
   @Prop @Watch('onTextChanged') text: string = '';
-  @Prop textColor: string = '#333333';
+  @Prop textColor: string = ThemeColors.text('light');
   @Prop fontSize: number = 15;
   @State segments: MdInline[] = [];
 
@@ -115,7 +118,7 @@ struct MarkdownText {
         if (seg.code) {
           Span(seg.text)
             .fontFamily('monospace')
-            .textBackgroundStyle({ color: '#F0F0F0', radius: 4 })
+            .textBackgroundStyle({ color: ThemeColors.inlineCodeBg(this.theme), radius: 4 })
         } else if (seg.bold) {
           Span(seg.text).fontWeight(FontWeight.Bold)
         } else {
@@ -134,8 +137,9 @@ struct MarkdownText {
 /** 轻量 Markdown 渲染：标题、加粗、行内代码、代码块、列表、引用、分割线 */
 @Component
 export struct MarkdownView {
+  @StorageLink('theme') theme: string = 'light';
   @Prop @Watch('onTextChanged') text: string = '';
-  @Prop textColor: string = '#333333';
+  @Prop textColor: string = ThemeColors.text('light');
   @Prop fontSize: number = 15;
   @State blocks: MdBlock[] = [];
 
@@ -162,7 +166,7 @@ export struct MarkdownView {
           }
           .scrollable(ScrollDirection.Horizontal)
           .width('100%').padding(10)
-          .backgroundColor('#F5F5F5').borderRadius(8)
+          .backgroundColor(ThemeColors.codeBg(this.theme)).borderRadius(8)
           .margin({ top: 4, bottom: 4 })
         } else if (block.kind === 'list') {
           Row() {
@@ -176,14 +180,18 @@ export struct MarkdownView {
           .width('100%').alignItems(VerticalAlign.Top).margin({ top: 2, bottom: 2 })
         } else if (block.kind === 'quote') {
           Row() {
-            Divider().vertical(true).color('#D0D0D0').margin({ right: 8 })
+            Divider().vertical(true).color(ThemeColors.border(this.theme)).margin({ right: 8 })
             Column() {
-              MarkdownText({ text: block.text, textColor: '#666666', fontSize: this.fontSize })
+              MarkdownText({
+                text: block.text,
+                textColor: ThemeColors.quoteText(this.theme),
+                fontSize: this.fontSize
+              })
             }.layoutWeight(1)
           }
           .width('100%').alignItems(VerticalAlign.Top).margin({ top: 4, bottom: 4 })
         } else if (block.kind === 'hr') {
-          Divider().width('100%').color('#E5E5E5').margin({ top: 8, bottom: 8 })
+          Divider().width('100%').color(ThemeColors.border(this.theme)).margin({ top: 8, bottom: 8 })
         } else {
           MarkdownText({ text: block.text, textColor: this.textColor, fontSize: this.fontSize })
         }

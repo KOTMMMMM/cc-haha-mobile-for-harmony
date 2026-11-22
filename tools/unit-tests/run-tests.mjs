@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 用 TypeScript 编译器把纯逻辑 .ets 转成 CommonJS，在 Node 中跑断言。
-// 只覆盖不依赖 ArkUI 的 ChatHistoryUtils，真机行为仍由 uitest 覆盖。
+// 覆盖不依赖 ArkUI 的 ChatHistoryUtils 与 SendReliability，真机行为仍由 uitest 覆盖。
 
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,12 +37,19 @@ try {
   transpile(join(etsRoot, 'services', 'chat', 'ChatHistoryUtils.ets'),
     join(dir, 'ChatHistoryUtils.js'),
     [["'../../models/Message'", "'./Message'"]]);
+  transpile(join(etsRoot, 'services', 'chat', 'SendReliability.ets'),
+    join(dir, 'SendReliability.js'),
+    [["'../../models/Message'", "'./Message'"], ["'./ChatHistoryUtils'", "'./ChatHistoryUtils'"]]);
 
   const {
     messageKey, mergeMessages, parseServerMessages, userDisplayText,
     lastAssistantSnippet
   } = await import(pathToFileURL(join(dir, 'ChatHistoryUtils.js')).href);
-  const { MessageModel, MessageRole } = await import(pathToFileURL(join(dir, 'Message.js')).href);
+  const { MessageModel, MessageRole, DeliveryState } =
+    await import(pathToFileURL(join(dir, 'Message.js')).href);
+  const {
+    eventConfirmsDelivery, resolvePendingDelivery, normalizeLoadedDelivery
+  } = await import(pathToFileURL(join(dir, 'SendReliability.js')).href);
 
   const results = [];
   const test = (name, fn) => {
@@ -91,6 +98,93 @@ try {
     assert.equal(parsed[1].contents.some(c => c.type === 'thinking' && c.text === 'think'), true);
     assert.equal(parsed[1].contents.some(c => c.type === 'tool_use' && c.status === 'completed'), true);
     assert.equal(parsed[2].role, MessageRole.USER);
+    assert.equal(parsed[0].serverId, 'u1');
+    assert.equal(parsed[2].serverId, 'u2');
+  });
+
+  test('mergeMessages: 两条相同用户消息按一对一消费，不吞掉合法重复', () => {
+    const ts = Date.parse('2026-11-14T10:00:00Z');
+    const mkLocal = (offset) => {
+      const m = new MessageModel(MessageRole.USER);
+      m.timestamp = ts + offset;
+      m.appendText('继续');
+      return m;
+    };
+    const remoteU = new MessageModel(MessageRole.USER, 'srv-1');
+    remoteU.serverId = 'srv-1';
+    remoteU.timestamp = ts;
+    remoteU.appendText('继续');
+
+    const merged = mergeMessages([mkLocal(0), mkLocal(1000)], [remoteU]);
+    // 远端一条 + 本地未匹配的一条 = 2；旧实现会把两条本地都当成重复只剩 1
+    assert.equal(merged.length, 2);
+  });
+
+  test('mergeMessages: serverId 相同以远端版本为准', () => {
+    const ts = Date.parse('2026-11-14T10:00:00Z');
+    const local = new MessageModel(MessageRole.USER, 'srv-9');
+    local.serverId = 'srv-9';
+    local.timestamp = ts;
+    local.appendText('old text');
+    const remote = new MessageModel(MessageRole.USER, 'srv-9');
+    remote.serverId = 'srv-9';
+    remote.timestamp = ts;
+    remote.appendText('server text');
+
+    const merged = mergeMessages([local], [remote]);
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].contents[0].text, 'server text');
+  });
+
+  test('eventConfirmsDelivery: 回合事件确认，idle/pong 不确认', () => {
+    assert.equal(eventConfirmsDelivery('content_delta', {}), true);
+    assert.equal(eventConfirmsDelivery('status', { state: 'thinking' }), true);
+    assert.equal(eventConfirmsDelivery('status', { state: 'idle' }), false);
+    assert.equal(eventConfirmsDelivery('session_state', { turnState: 'running' }), true);
+    assert.equal(eventConfirmsDelivery('session_state', { turnState: 'idle' }), false);
+    assert.equal(eventConfirmsDelivery('pong', {}), false);
+  });
+
+  test('resolvePendingDelivery: 同文确认、空闲失败、生成中等待', () => {
+    const ts = Date.parse('2026-11-14T10:00:00Z');
+    const pending = () => {
+      const m = new MessageModel(MessageRole.USER);
+      m.timestamp = ts;
+      m.appendText('继续');
+      m.setDelivery(DeliveryState.SENDING);
+      return m;
+    };
+    const remote = new MessageModel(MessageRole.USER, 'srv-1');
+    remote.serverId = 'srv-1';
+    remote.timestamp = ts;
+    remote.appendText('继续');
+
+    assert.equal(resolvePendingDelivery([pending()], [remote], false)[0].state, DeliveryState.SENT);
+    assert.equal(resolvePendingDelivery([pending()], [], false)[0].state, DeliveryState.FAILED);
+    assert.equal(resolvePendingDelivery([pending()], [], true)[0].state, DeliveryState.SENDING);
+    // 远端只有一条时，两条本地同文只能确认一条
+    const two = resolvePendingDelivery([pending(), pending()], [remote], false);
+    assert.equal(two.filter(r => r.state === DeliveryState.SENT).length, 1);
+    assert.equal(two.filter(r => r.state === DeliveryState.FAILED).length, 1);
+  });
+
+  test('resolvePendingDelivery: 纯附件消息不误判失败', () => {
+    const m = new MessageModel(MessageRole.USER);
+    m.timestamp = Date.parse('2026-11-14T10:00:00Z');
+    m.appendText('[图片] a.png');
+    m.setDelivery(DeliveryState.SENDING);
+    const res = resolvePendingDelivery([m], [], false);
+    assert.equal(res[0].state, DeliveryState.SENDING);
+  });
+
+  test('normalizeLoadedDelivery: queued 降级 failed，sending 保留待对账', () => {
+    const queued = new MessageModel(MessageRole.USER);
+    queued.setDelivery(DeliveryState.QUEUED);
+    const sending = new MessageModel(MessageRole.USER);
+    sending.setDelivery(DeliveryState.SENDING);
+    normalizeLoadedDelivery([queued, sending]);
+    assert.equal(queued.delivery, DeliveryState.FAILED);
+    assert.equal(sending.delivery, DeliveryState.SENDING);
   });
 
   test('mergeMessages: 相同内容不重复，保留更完整的 assistant', () => {

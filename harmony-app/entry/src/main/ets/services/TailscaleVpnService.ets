@@ -30,8 +30,11 @@ export class TailscaleVpnService {
   // 心跳过期时自动重启扩展，指数退避避免抖动
   private restartAttempts: number = 0;
   private lastRestartAt: number = 0;
+  // 重启/冷启动后给扩展留出启动和写心跳的时间，避免把旧状态误判为 stale 而连续重启
+  private restartGraceUntil: number = 0;
   private readonly RESTART_BASE_MS: number = 2000;
   private readonly RESTART_MAX_MS: number = 30000;
+  private readonly RESTART_GRACE_MS: number = 15000;
 
   initialize(context: common.UIAbilityContext): Promise<void> {
     this.context = context;
@@ -52,6 +55,9 @@ export class TailscaleVpnService {
       Logger.warn('[TS] preferences init failed: ' + (error as Error).message);
     }
     AppStorage.setOrCreate('tailscaleAutoConnect', this.autoConnect);
+    // 冷启动时 ensureConnected() 会显式拉起扩展；先给 15s 宽限，
+    // 不要让状态文件里的旧心跳触发 forceRestart 打断首次启动。
+    this.restartGraceUntil = Date.now() + this.RESTART_GRACE_MS;
     this.startPolling();
     this.refreshStatus();
   }
@@ -209,6 +215,7 @@ export class TailscaleVpnService {
       this.ensureRuntimeDir();
       this.writeRequest('start');
       await vpnExtension.startVpnExtensionAbility(want);
+      this.restartGraceUntil = Date.now() + this.RESTART_GRACE_MS;
       Logger.info('[TS] extension restart requested attempt=' + this.restartAttempts);
       AppStorage.setOrCreate('tailscaleState', 'starting');
       AppStorage.setOrCreate('tailscaleDetail', 'Tailscale 无响应，正在重启');
@@ -279,6 +286,7 @@ export class TailscaleVpnService {
     if (running) {
       this.restartAttempts = 0;
     } else if (stale && this.autoConnect && !this.startInFlight &&
+      Date.now() >= this.restartGraceUntil &&
       AppStorage.get<boolean>('appForeground') === true) {
       const delay: number = Math.min(
         this.RESTART_BASE_MS * Math.pow(2, Math.min(this.restartAttempts, 4)),

@@ -33,6 +33,7 @@ export class ApiService {
   private token: string = '';
   private currentHost: string = '';
   private currentPort: number = 0;
+  private scheme: string = 'http';
   private httpClient: http.HttpRequest = http.createHttp();
   // HarmonyOS 的 HttpRequest 不适合并发复用：这里把请求串行化，避免相互打断和频繁建连
   private tail: Promise<void> = Promise.resolve();
@@ -44,13 +45,23 @@ export class ApiService {
 
   private static readonly RESOLVE_TTL_MS: number = 60000;
 
-  setConnection(host: string, port: number, token: string): void {
-    const nextUrl: string = 'http://' + host + ':' + port;
+  private originFor(host: string, port: number, scheme: string): string {
+    if (scheme === 'https') {
+      return (port && port !== 443) ? 'https://' + host + ':' + port : 'https://' + host;
+    }
+    return 'http://' + host + ':' + port;
+  }
+
+  setConnection(host: string, port: number, token: string, scheme: string = 'http'): void {
+    const mode: string = scheme === 'https' ? 'https' : 'http';
+    const nextUrl: string = this.originFor(host, port, mode);
     const changed: boolean = nextUrl !== this.baseUrl;
     this.baseUrl = nextUrl;
     this.token = token;
     this.currentHost = host;
     this.currentPort = port;
+    this.scheme = mode;
+    AppStorage.setOrCreate('connectionScheme', mode);
     if (changed) {
       this.queueGeneration++;
       this.resolvedHost = '';
@@ -73,6 +84,8 @@ export class ApiService {
     this.token = '';
     this.currentHost = '';
     this.currentPort = 0;
+    this.scheme = 'http';
+    AppStorage.setOrCreate('connectionScheme', 'http');
     this.invalidateResolution();
     this.queueGeneration++;
     this.resetHttpClient();
@@ -81,6 +94,7 @@ export class ApiService {
   getBaseUrl(): string { return this.baseUrl; }
   getCurrentHost(): string { return this.currentHost; }
   getCurrentPort(): number { return this.currentPort; }
+  getScheme(): string { return this.scheme; }
 
   /** 地址/网络可能已变化，让下一次 ensureConnection 重新探测。 */
   invalidateResolution(): void {
@@ -93,7 +107,7 @@ export class ApiService {
     if (!this.currentHost || this.currentPort <= 0) {
       return false;
     }
-    const ok: boolean = await this.probe(this.currentHost, this.currentPort);
+    const ok: boolean = await this.probe(this.currentHost, this.currentPort, this.scheme);
     if (ok) {
       AppStorage.setOrCreate('pcReachable', true);
     }
@@ -111,10 +125,48 @@ export class ApiService {
   }
 
   /**
+   * 公共访问配对接口（无需登录）：用于 #pair= 链接的 /pair 与 /claim。
+   * 始终走 HTTPS，独立短连接，不占用主 HTTP 队列。
+   */
+  async publicPairPost(host: string, port: number, path: string, body: Object): Promise<Record<string, Object>> {
+    const client = http.createHttp();
+    try {
+      const options: http.HttpRequestOptions = {
+        method: http.RequestMethod.POST,
+        header: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'cc-haha-mobile/1.0.0',
+          'Origin': this.originFor(host, port, 'https')
+        },
+        extraData: body,
+        expectDataType: http.HttpDataType.STRING,
+        connectTimeout: 10000,
+        readTimeout: 15000
+      };
+      const resp = await client.request(this.originFor(host, port, 'https') + path, options);
+      const text: string = resp.result as string;
+      if (resp.responseCode >= 400) {
+        let msg: string = 'HTTP ' + resp.responseCode;
+        try {
+          const errObj = JSON.parse(text) as Record<string, Object>;
+          const e = errObj['error'] as string;
+          if (e) { msg = e; }
+        } catch (e) {
+        }
+        throw new Error(msg);
+      }
+      if (!text || text.length === 0) { return {}; }
+      return JSON.parse(text) as Record<string, Object>;
+    } finally {
+      client.destroy();
+    }
+  }
+
+  /**
    * 快速探测某个地址是否可达（独立短超时，不进入串行队列）。
    * 用于在局域网 IP / Tailscale IP 之间自动选择。
    */
-  async probe(host: string, port: number): Promise<boolean> {
+  async probe(host: string, port: number, scheme: string = 'http'): Promise<boolean> {
     if (!host || port <= 0) { return false; }
     const client = http.createHttp();
     try {
@@ -125,7 +177,7 @@ export class ApiService {
         connectTimeout: 3500,
         readTimeout: 3500
       };
-      const resp = await client.request('http://' + host + ':' + port + '/health', options);
+      const resp = await client.request(this.originFor(host, port, scheme) + '/health', options);
       if (resp.responseCode !== 200) { return false; }
       const body = resp.result as string;
       try {
@@ -332,7 +384,8 @@ export class ApiService {
   }
 
   /** 在多个候选地址中选第一个可达的（并行探测）；全部不可达返回空串。 */
-  async pickReachableHost(baseHost: string, alternates: string[], port: number): Promise<string> {
+  async pickReachableHost(baseHost: string, alternates: string[], port: number,
+    scheme: string = 'http'): Promise<string> {
     const candidates: string[] = [];
     const add = (host: string): void => {
       if (host && candidates.indexOf(host) < 0) { candidates.push(host); }
@@ -341,13 +394,13 @@ export class ApiService {
     for (const host of alternates) { add(host); }
     if (candidates.length === 0) { return ''; }
     if (candidates.length === 1) {
-      return (await this.probe(candidates[0], port)) ? candidates[0] : '';
+      return (await this.probe(candidates[0], port, scheme)) ? candidates[0] : '';
     }
     return new Promise<string>((resolve: (host: string) => void): void => {
       let pending: number = candidates.length;
       let settled: boolean = false;
       for (const host of candidates) {
-        this.probe(host, port).then((ok: boolean): void => {
+        this.probe(host, port, scheme).then((ok: boolean): void => {
           pending--;
           if (settled) { return; }
           if (ok) {
@@ -376,16 +429,33 @@ export class ApiService {
       Date.now() - this.resolvedAt < ApiService.RESOLVE_TTL_MS) {
       return true;
     }
+    // 公共访问（Cloudflare HTTPS）：固定单地址，不做局域网/Tailscale 备用探测
+    if (config.scheme === 'https') {
+      const remoteOk: boolean = await this.probe(config.host, config.port, 'https');
+      if (remoteOk) {
+        this.setConnection(config.host, config.port, config.token, 'https');
+        this.resolvedHost = config.host;
+        this.resolvedAt = Date.now();
+        AppStorage.setOrCreate('pcActiveHost', config.host);
+        AppStorage.setOrCreate('pcReachable', true);
+        return true;
+      }
+      Logger.info('remote host unreachable: ' + config.host);
+      this.invalidateResolution();
+      if (this.baseUrl.length > 0) { this.clearConnection(); }
+      AppStorage.setOrCreate('pcReachable', false);
+      return false;
+    }
     const alternates: string[] = [];
     const cached: string = AppStorage.get<string>('pcActiveHost') ?? '';
     if (cached) { alternates.push(cached); }
     if (config.alternates) {
       for (const host of config.alternates) { alternates.push(host); }
     }
-    const host: string = await this.pickReachableHost(config.host, alternates, config.port);
+    const host: string = await this.pickReachableHost(config.host, alternates, config.port, 'http');
     if (host.length > 0) {
       Logger.info('connect host ' + host + ' -> reachable');
-      this.setConnection(host, config.port, config.token);
+      this.setConnection(host, config.port, config.token, 'http');
       this.resolvedHost = host;
       this.resolvedAt = Date.now();
       AppStorage.setOrCreate('pcActiveHost', host);
@@ -427,6 +497,10 @@ export class ApiService {
       'Content-Type': 'application/json',
       'User-Agent': 'cc-haha-mobile/1.0.0'
     };
+    if (this.scheme === 'https') {
+      // 公共访问网关要求 Origin；原生 App 与浏览器 H5 使用同一来源
+      reqHeader['Origin'] = this.baseUrl;
+    }
     if (withAuth && this.token) { reqHeader['Authorization'] = 'Bearer ' + this.token; }
     const options: http.HttpRequestOptions = {
       method: method as http.RequestMethod, header: reqHeader,

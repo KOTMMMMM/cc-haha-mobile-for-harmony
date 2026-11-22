@@ -8,6 +8,7 @@ import { ApiService } from '../services/ApiService';
 import { SessionService } from '../services/SessionService';
 import { TailscaleVpnService } from '../services/TailscaleVpnService';
 import { Logger } from '../utils/Logger';
+import { ThemeColors } from '../utils/ThemeUtil';
 
 @Entry
 @Component
@@ -124,7 +125,6 @@ struct Index {
       ConnectionStatus({
         connectionState: this.displayConnectionState(),
         pcHostname: this.pcHostname,
-        isDark: this.theme === 'dark',
         onTap: () => { this.currentTabIndex = 1; },
         onRefresh: () => {
           AppStorage.setOrCreate('chatRefresh', Date.now());
@@ -137,10 +137,11 @@ struct Index {
         TabContent() { SessionsContent() }
           .tabBar(this.TabBar('会话', 0))
 
-        TabContent() { SettingsContent() }
+        TabContent() { SettingsContent({ connectionState: this.displayConnectionState() }) }
           .tabBar(this.TabBar('设置', 1))
       }
-      .barWidth('100%').barHeight(56).scrollable(false)
+      .barWidth('100%').barHeight(48).scrollable(false)
+      .barBackgroundColor(ThemeColors.tabBarBg(this.theme))
       .onChange((index: number) => {
         this.currentTabIndex = index;
         if (index === 1) {
@@ -152,24 +153,20 @@ struct Index {
       })
       .layoutWeight(1)
     }
-    .width('100%').height('100%').backgroundColor(this.theme === 'dark' ? '#141414' : '#F8F8F8')
+    .width('100%').height('100%').backgroundColor(ThemeColors.pageBg(this.theme))
   }
 
   @Builder TabBar(title: string, index: number) {
     Column() {
-      Text(this.getTabIcon(index)).fontSize(22)
-        .fontColor(this.currentTabIndex === index ? '#1677FF' : (this.theme === 'dark' ? '#666' : '#999'))
-      Text(title).fontSize(10)
-        .fontColor(this.currentTabIndex === index ? '#1677FF' : (this.theme === 'dark' ? '#666' : '#999'))
-        .margin({ top: 2 })
+      Text(title).fontSize(12)
+        .fontWeight(this.currentTabIndex === index ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.currentTabIndex === index ? ThemeColors.primary : ThemeColors.textSecondary(this.theme))
     }
-    .padding({ top: 4, bottom: 4 }).width('100%')
+    .height('100%').width('100%')
     .alignItems(HorizontalAlign.Center).justifyContent(FlexAlign.Center)
+    .accessibilityLevel('yes')
+    .accessibilityText(title + (this.currentTabIndex === index ? '，已选中' : ''))
+    .id(index === 0 ? 'tab-sessions' : 'tab-settings')
     .onClick(() => { this.currentTabIndex = index; })
-  }
-
-  private getTabIcon(index: number): string {
-    const icons: string[] = ['S', 'ST'];
-    return icons[index] || '';
   }
 }

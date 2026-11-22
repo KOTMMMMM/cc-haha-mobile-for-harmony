@@ -1,6 +1,6 @@
 import preferences from '@ohos.data.preferences';
 import { fileIo } from '@kit.CoreFileKit';
-import { MessageModel, MessageRole, MsgUsage, ContentBlock } from '../models/Message';
+import { MessageModel, MessageRole, MsgUsage, ContentBlock, DeliveryState } from '../models/Message';
 import { SessionModel, Session } from '../models/Session';
 import { Constants } from '../utils/Constants';
 import { Logger } from '../utils/Logger';
@@ -12,6 +12,20 @@ interface StoredMessage {
   model: string;
   usage: MsgUsage | null;
   contents: ContentBlock[];
+  /** 服务端消息 ID（断线补拉时用于判断与本地缓存重叠） */
+  serverId?: string;
+  /** 本地发送状态（sending/queued/failed/sent） */
+  delivery?: string;
+}
+
+function parseDelivery(value: string | undefined): DeliveryState {
+  switch (value) {
+    case 'sending': return DeliveryState.SENDING;
+    case 'queued': return DeliveryState.QUEUED;
+    case 'failed': return DeliveryState.FAILED;
+    case 'sent': return DeliveryState.SENT;
+    default: return DeliveryState.NONE;
+  }
 }
 
 interface StoredSession {
@@ -140,7 +154,8 @@ export class HistoryStore {
       for (const m of slice) {
         list.push({
           id: m.id, role: m.role, timestamp: m.timestamp,
-          model: m.model ?? '', usage: m.usage ?? null, contents: m.contents
+          model: m.model ?? '', usage: m.usage ?? null, contents: m.contents,
+          serverId: m.serverId, delivery: m.delivery
         });
       }
       let json: string = JSON.stringify(list);
@@ -177,6 +192,8 @@ export class HistoryStore {
         msg.timestamp = r.timestamp;
         msg.model = r.model;
         msg.usage = r.usage ?? undefined;
+        msg.serverId = r.serverId ?? '';
+        msg.delivery = parseDelivery(r.delivery);
         if (Array.isArray(r.contents)) { msg.contents = r.contents; }
         msg.isStreaming = false;
         result.push(msg);

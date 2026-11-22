@@ -2,6 +2,7 @@ import router from '@ohos.router';
 import { webview } from '@kit.ArkWeb';
 import { promptAction } from '@kit.ArkUI';
 import { TailscaleVpnService } from '../services/TailscaleVpnService';
+import { ThemeColors } from '../utils/ThemeUtil';
 
 /**
  * 应用内 Tailscale 登录：用 WebView 打开扩展给出的 authUrl，
@@ -10,6 +11,7 @@ import { TailscaleVpnService } from '../services/TailscaleVpnService';
 @Entry
 @Component
 struct TailscaleLoginPage {
+  @StorageLink('theme') theme: string = 'light';
   @StorageLink('tailscaleService') tailscaleService: TailscaleVpnService = new TailscaleVpnService();
   @StorageLink('tailscaleState') @Watch('onStateChanged') tailscaleState: string = 'idle';
   @StorageLink('tailscaleAuthUrl') authUrl: string = '';
@@ -22,7 +24,7 @@ struct TailscaleLoginPage {
     const params = router.getParams() as Record<string, Object>;
     const fromParams = params ? (params['url'] as string) : '';
     this.url = (fromParams && fromParams.length > 0) ? fromParams : this.authUrl;
-    this.detail = this.url.length > 0 ? '' : '暂时没有登录链接，请先开启内置 Tailscale 并稍候重试。';
+    this.detail = this.url.length > 0 ? '' : '请先开启内置 Tailscale';
     this.tailscaleService.refreshStatus();
   }
 
@@ -30,12 +32,11 @@ struct TailscaleLoginPage {
     if (this.closed) { return; }
     if (this.tailscaleState === 'running') {
       this.closed = true;
-      promptAction.showToast({ message: 'Tailscale 已登录', duration: 1500 });
       setTimeout((): void => {
         router.back();
       }, 600);
     } else if (this.tailscaleState === 'failed' || this.tailscaleState === 'stale') {
-      this.detail = '登录状态异常，请返回重试或改用浏览器打开。';
+      this.detail = '登录状态异常';
     }
   }
 
@@ -53,31 +54,30 @@ struct TailscaleLoginPage {
       this.url = this.authUrl;
       this.detail = '';
     } else {
-      this.detail = '暂时没有登录链接，请稍候再试。';
+      this.detail = '请稍候重试';
     }
   }
 
   build() {
     Column() {
       Row() {
-        Text('‹').fontSize(32).fontWeight(FontWeight.Medium).fontColor('#333')
+        Text('‹').fontSize(30).fontColor(ThemeColors.textStrong(this.theme))
           .width(44).height('100%').textAlign(TextAlign.Center)
+          .accessibilityLevel('yes').accessibilityText('返回').id('ts-login-back')
           .onClick(() => { router.back(); })
 
-        Text('Tailscale 登录').fontSize(16).fontWeight(FontWeight.Medium).fontColor('#333')
-          .layoutWeight(1).margin({ left: 2 })
+        Text('Tailscale 登录').fontSize(16).fontWeight(FontWeight.Medium)
+          .fontColor(ThemeColors.textStrong(this.theme))
+          .layoutWeight(1).textAlign(TextAlign.Center)
 
-        Text('浏览器打开').fontSize(13).fontColor('#1677FF')
-          .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-          .onClick(() => { this.openInBrowser(); })
-
-        Text('刷新').fontSize(13).fontColor('#1677FF')
-          .padding({ left: 10, right: 12, top: 8, bottom: 8 })
+        Text('↻').fontSize(17).fontColor(ThemeColors.primary)
+          .width(44).height('100%').textAlign(TextAlign.Center)
+          .accessibilityLevel('yes').accessibilityText('刷新登录链接').id('ts-login-refresh')
           .onClick(() => { this.refreshLink(); })
       }
-      .width('100%').height(52)
-      .backgroundColor('#FFFFFF')
-      .border({ width: { bottom: 0.5 }, color: '#E5E5E5' })
+      .width('100%').height(48)
+      .backgroundColor(ThemeColors.card(this.theme))
+      .border({ width: { bottom: 0.5 }, color: ThemeColors.divider(this.theme) })
       .alignItems(VerticalAlign.Center)
 
       if (this.url.length > 0) {
@@ -85,13 +85,16 @@ struct TailscaleLoginPage {
           .width('100%').layoutWeight(1)
       } else {
         Column() {
-          Text(this.detail).fontSize(14).fontColor('#666')
-            .textAlign(TextAlign.Center).padding(24)
-          Button('重新获取登录链接').type(ButtonType.Capsule).backgroundColor('#1677FF')
-            .fontColor('#FFFFFF').height(42).onClick(() => { this.refreshLink(); })
+          Text(this.detail).fontSize(14).fontColor(ThemeColors.textSecondary(this.theme))
+            .textAlign(TextAlign.Center).padding({ left: 24, right: 24, bottom: 16 })
+            .accessibilityLevel('yes').accessibilityText('暂无登录链接')
+          Button('在浏览器打开').type(ButtonType.Capsule).backgroundColor(ThemeColors.primarySoft(this.theme))
+            .fontColor(ThemeColors.primary).height(44)
+            .accessibilityLevel('yes').accessibilityText('在浏览器打开').id('ts-login-browser')
+            .onClick(() => { this.openInBrowser(); })
         }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
       }
     }
-    .width('100%').height('100%').backgroundColor('#F8F8F8')
+    .width('100%').height('100%').backgroundColor(ThemeColors.pageBg(this.theme))
   }
 }

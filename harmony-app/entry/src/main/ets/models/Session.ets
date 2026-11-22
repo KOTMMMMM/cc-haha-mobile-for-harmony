@@ -1,11 +1,16 @@
 export type SessionStatus = 'idle' | 'generating' | 'executing' | 'error';
 
+/** 服务端没有显式的运行状态：modifiedAt 在生成/工具执行期间持续刷新，据此判断活跃。 */
+const RUNNING_WINDOW_MS: number = 60 * 1000;
+
 @Observed
 export class SessionModel {
   id: string;
   title: string;
   workDir: string;
   status: SessionStatus;
+  /** 列表轮询时刷新，供圆点直接响应（时间窗口无法自行触发重绘） */
+  running: boolean = false;
   model: string;
   createdAt: number;
   lastActivityAt: number;
@@ -35,6 +40,27 @@ export class SessionModel {
   }
 
   updateActivity(): void { this.lastActivityAt = Date.now(); }
+
+  /**
+   * 本地启发式：服务端状态 + 最近活动时间。
+   * 仅在 WS 精确订阅尚未覆盖该会话时使用（长时间工具执行可能提前判空闲）。
+   */
+  isRunningHeuristic(): boolean {
+    if (this.status === 'generating' || this.status === 'executing') { return true; }
+    // 空会话的 modifiedAt 也是“刚刚”，但并未生成，必须排除
+    if (this.messageCount <= 0) { return false; }
+    return this.lastActivityAt > 0 && Date.now() - this.lastActivityAt < RUNNING_WINDOW_MS;
+  }
+
+  isRunning(): boolean { return this.isRunningHeuristic(); }
+
+  /**
+   * 刷新圆点状态。
+   * authoritative：WS 精确订阅结果（true/false）；未提供时回退本地启发式。
+   */
+  refreshRunning(authoritative?: boolean): void {
+    this.running = authoritative === undefined ? this.isRunningHeuristic() : authoritative;
+  }
 
   getDisplayTitle(): string {
     if (this.title && this.title.length > 0) { return this.title; }

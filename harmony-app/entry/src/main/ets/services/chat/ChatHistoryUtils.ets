@@ -75,38 +75,61 @@ export function userDisplayText(m: MessageModel): string {
   return kept.join('\n').trim();
 }
 
+function decCount(map: Map<string, number>, key: string): void {
+  const n = map.get(key) ?? 0;
+  if (n <= 1) { map.delete(key); } else { map.set(key, n - 1); }
+}
+
+/**
+ * 合并本地缓存与服务端历史。
+ * 去重按「一对一消费」计数：远端有两条相同的“继续”、本地也有两条时不会互相吞掉。
+ * 优先用 serverId 精确匹配；文本只作为本地乐观消息（无 serverId）的兜底。
+ */
 export function mergeMessages(local: MessageModel[], remote: MessageModel[]): MessageModel[] {
   const merged: MessageModel[] = [];
-  const keys = new Set<string>();
+  const keyCounts: Map<string, number> = new Map();
+  const userTextCounts: Map<string, number> = new Map();
+  const serverIds: Set<string> = new Set();
   let remoteMin = 0;
   let remoteMax = 0;
   for (let i = 0; i < remote.length; i++) {
     const m = remote[i];
-    keys.add(messageKey(m));
+    const k = messageKey(m);
+    keyCounts.set(k, (keyCounts.get(k) ?? 0) + 1);
+    if (m.role === MessageRole.USER) {
+      const t = userDisplayText(m);
+      if (t.length > 0) { userTextCounts.set(t, (userTextCounts.get(t) ?? 0) + 1); }
+    }
+    if (m.serverId) { serverIds.add(m.serverId); }
     merged.push(m);
     if (i === 0 || m.timestamp < remoteMin) { remoteMin = m.timestamp; }
     if (i === 0 || m.timestamp > remoteMax) { remoteMax = m.timestamp; }
   }
   for (const m of local) {
+    // 同一服务端消息已由远端提供时，以远端版本为准
+    if (m.serverId && serverIds.has(m.serverId)) { continue; }
     // 只有与远端页时间窗重叠的消息才可能重复。
     // 几千条旧消息直接跳过文本比较，避免 O(本地条数 × 远端条数) 的字符串扫描。
     const nearRemote = remote.length > 0 &&
       m.timestamp >= remoteMin - 600000 && m.timestamp <= remoteMax + 600000;
     if (nearRemote) {
       const k = messageKey(m);
-      if (keys.has(k)) { continue; }
-      if (m.role === MessageRole.USER) {
-        // 附件文件名在服务端会被重命名，不能作为去重依据：只比较去掉附件标记后的正文
-        const lt = userDisplayText(m);
-        let dup = false;
-        if (lt.length > 0) {
-          for (const r of merged) {
-            if (r.role !== MessageRole.USER) { continue; }
-            if (Math.abs(r.timestamp - m.timestamp) > 600000) { continue; }
-            if (userDisplayText(r) === lt) { dup = true; break; }
-          }
+      if ((keyCounts.get(k) ?? 0) > 0) {
+        decCount(keyCounts, k);
+        if (m.role === MessageRole.USER) {
+          const t = userDisplayText(m);
+          if (t.length > 0 && (userTextCounts.get(t) ?? 0) > 0) { decCount(userTextCounts, t); }
         }
-        if (dup) { continue; }
+        continue;
+      }
+      if (m.role === MessageRole.USER) {
+        // 附件文件名在服务端会被重命名，不能作为去重依据：只比较去掉附件标记后的正文。
+        // 一对一消费计数，避免把用户连续发送的两条相同指令误判为重复。
+        const lt = userDisplayText(m);
+        if (lt.length > 0 && (userTextCounts.get(lt) ?? 0) > 0) {
+          decCount(userTextCounts, lt);
+          continue;
+        }
       }
       if (m.role === MessageRole.ASSISTANT) {
         const lt = concatAssistantText(m);
@@ -130,13 +153,12 @@ export function mergeMessages(local: MessageModel[], remote: MessageModel[]): Me
             if (Math.abs(r.timestamp - m.timestamp) >= 600000) { continue; }
             const rt = concatAssistantText(r);
             if (rt.length >= 12 && rt.length < lt.length && lt.indexOf(rt) >= 0) {
-              keys.delete(messageKey(r));
+              decCount(keyCounts, messageKey(r));
               merged.splice(i, 1);
             }
           }
         }
       }
-      keys.add(k);
     }
     merged.push(m);
   }
@@ -190,14 +212,18 @@ export function parseServerMessages(rawList: Record<string, Object>[]): MessageM
     const type = raw.type as string;
     const ts = parseTime(raw.timestamp as string);
     if (type === 'user') {
-      const msg = new MessageModel(MessageRole.USER, raw.id as string);
+      const serverId = (raw.id as string) ?? '';
+      const msg = new MessageModel(MessageRole.USER, serverId || undefined);
+      msg.serverId = serverId;
       msg.timestamp = ts;
       appendContentBlocks(msg, raw.content);
       result.push(msg);
       current = null;
     } else if (type === 'assistant') {
       if (!current) {
-        current = new MessageModel(MessageRole.ASSISTANT, raw.id as string);
+        const serverId = (raw.id as string) ?? '';
+        current = new MessageModel(MessageRole.ASSISTANT, serverId || undefined);
+        current.serverId = serverId;
         current.timestamp = ts;
         current.model = raw.model as string;
         result.push(current);

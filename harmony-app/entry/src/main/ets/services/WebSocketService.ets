@@ -23,6 +23,7 @@ export class WebSocketService {
   private connectionState: string = 'disconnected';
   private host: string = '';
   private port: number = Constants.DEFAULT_PORT;
+  private scheme: string = 'http';
   private token: string = '';
   private sessionId: string = '';
   private origin: string = '';
@@ -67,6 +68,7 @@ export class WebSocketService {
       }
       this.host = host;
       this.port = port;
+      this.scheme = AppStorage.get<string>('connectionScheme') === 'https' ? 'https' : 'http';
       this.token = token;
       this.sessionId = sessionId;
       this.origin = origin;
@@ -79,6 +81,14 @@ export class WebSocketService {
   }
 
   private buildUrl(): string {
+    if (this.scheme === 'https') {
+      // 与官方原生客户端一致：远程连接不在 query 里带 token，凭证只走 Authorization 头；
+      // 公共访问网关对浏览器式 token 参数会直接断开（表现为客户端 WS error）。
+      const authority: string = this.port && this.port !== 443
+        ? this.host + ':' + this.port : this.host;
+      return 'wss://' + authority + Constants.WS_PATH +
+        encodeURIComponent(this.sessionId) + '?media=ref';
+    }
     return 'ws://' + this.host + ':' + this.port + Constants.WS_PATH +
       encodeURIComponent(this.sessionId) + '?token=' + encodeURIComponent(this.token);
   }
@@ -122,9 +132,19 @@ export class WebSocketService {
       }
     };
 
-    // HarmonyOS 自动发送的 Origin 为 http://host（不带端口），
+    // 局域网直连：HarmonyOS 自动发送的 Origin 为 http://host（不带端口），
     // 需在 cc-haha 的 h5Access.allowedOrigins 中加入该 Origin。
-    socket.connect(url, onConnect);
+    // 公共访问（HTTPS）：与非原生浏览器一致，显式带 Bearer 与 Origin 头。
+    if (this.scheme === 'https') {
+      // 只带 Authorization：HarmonyOS 会自动添加 Origin，手动再带会形成重复头导致握手失败
+      const headers: Record<string, string> = {
+        'Authorization': 'Bearer ' + this.token
+      };
+      const options: webSocket.WebSocketRequestOptions = { header: headers };
+      socket.connect(url, options, onConnect);
+    } else {
+      socket.connect(url, onConnect);
+    }
 
     socket.on('message', (err: Object, value: string | ArrayBuffer) => {
       if (!isCurrent() || err) { return; }
@@ -264,19 +284,36 @@ export class WebSocketService {
   }
 
   send(data: Object): void {
-    if (!this.ws || !this.isConnected) {
-      Logger.warn('Cannot send: not connected');
-      return;
-    }
-    const t0 = Date.now();
-    try {
-      this.ws.send(JSON.stringify(data), (err: Object) => {
-        if (err) { Logger.error('Send failed ' + JSON.stringify(err) + ' after ' + (Date.now() - t0) + 'ms'); }
-        else { Logger.warn('[CC] send flushed in ' + (Date.now() - t0) + 'ms'); }
-      });
-    } catch (e) {
-      Logger.error('Send exception ' + (e as Error).message);
-    }
+    this.sendWithResult(data);
+  }
+
+  /**
+   * 发送并等待底层 flush 结果。
+   * 只代表数据已交给 WebSocket，不代表服务端已接受（服务端无 ACK，需靠事件/历史对账）。
+   */
+  sendWithResult(data: Object): Promise<boolean> {
+    return new Promise<boolean>((resolve: (ok: boolean) => void): void => {
+      if (!this.ws || !this.isConnected) {
+        Logger.warn('Cannot send: not connected');
+        resolve(false);
+        return;
+      }
+      const t0 = Date.now();
+      try {
+        this.ws.send(JSON.stringify(data), (err: Object) => {
+          if (err) {
+            Logger.error('Send failed ' + JSON.stringify(err) + ' after ' + (Date.now() - t0) + 'ms');
+            resolve(false);
+          } else {
+            Logger.warn('[CC] send flushed in ' + (Date.now() - t0) + 'ms');
+            resolve(true);
+          }
+        });
+      } catch (e) {
+        Logger.error('Send exception ' + (e as Error).message);
+        resolve(false);
+      }
+    });
   }
 
   on(event: string, callback: WsEventHandler, owner: string = ''): void {

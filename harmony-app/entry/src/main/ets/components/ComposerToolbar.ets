@@ -2,6 +2,7 @@ import { WebSocketService } from '../services/WebSocketService';
 import { ApiService, SessionInspection } from '../services/ApiService';
 import { promptAction } from '@kit.ArkUI';
 import { Logger } from '../utils/Logger';
+import { ThemeColors } from '../utils/ThemeUtil';
 
 interface PermOption { mode: string; label: string; }
 interface EffortOption { level: string; label: string; }
@@ -29,6 +30,7 @@ const EFFORT_OPTIONS: EffortOption[] = [
  */
 @Component
 export struct ComposerToolbar {
+  @StorageLink('theme') theme: string = 'light';
   @Prop @Watch('onSessionChanged') sessionId: string = '';
   @Prop @Watch('onGeneratingChanged') isGenerating: boolean = false;
   @StorageLink('wsService') wsService: WebSocketService = new WebSocketService();
@@ -229,10 +231,10 @@ export struct ComposerToolbar {
   }
 
   private permissionColor(): string {
-    if (this.permissionMode === 'bypassPermissions') { return '#E54D42'; }
-    if (this.permissionMode === 'plan') { return '#1677FF'; }
-    if (this.permissionMode === 'acceptEdits') { return '#FA9D3B'; }
-    return '#8C8C8C';
+    if (this.permissionMode === 'bypassPermissions') { return ThemeColors.dangerText(this.theme); }
+    if (this.permissionMode === 'plan') { return ThemeColors.primary; }
+    if (this.permissionMode === 'acceptEdits') { return ThemeColors.warningText(this.theme); }
+    return ThemeColors.textSecondary(this.theme);
   }
 
   private effortLabel(): string {
@@ -243,9 +245,9 @@ export struct ComposerToolbar {
   }
 
   private contextColor(): string {
-    if (this.contextPercent >= 85) { return '#E54D42'; }
-    if (this.contextPercent >= 70) { return '#FA9D3B'; }
-    return '#8C8C8C';
+    if (this.contextPercent >= 85) { return ThemeColors.dangerText(this.theme); }
+    if (this.contextPercent >= 70) { return ThemeColors.warningText(this.theme); }
+    return ThemeColors.textSecondary(this.theme);
   }
 
   private applyPermission(mode: string): void {
@@ -260,7 +262,6 @@ export struct ComposerToolbar {
     const payload: WsSetPermissionMode = { type: 'set_permission_mode', mode: mode };
     this.wsService.send(payload);
     this.permissionMode = mode;
-    promptAction.showToast({ message: '权限模式：' + this.permissionLabel(), duration: 1200 });
   }
 
   private applyModel(index: number): void {
@@ -279,7 +280,6 @@ export struct ComposerToolbar {
     this.providerId = pid;
     this.modelId = mid;
     this.modelLabel = mid;
-    promptAction.showToast({ message: '已切换模型：' + mid, duration: 1200 });
     setTimeout(() => { this.refreshStatus(); }, 1500);
   }
 
@@ -299,15 +299,9 @@ export struct ComposerToolbar {
     };
     this.wsService.send(payload);
     this.effortLevel = level;
-    promptAction.showToast({ message: '思考强度：' + this.effortLabel(), duration: 1200 });
   }
 
   private refreshContext(): void {
-    if (this.contextTokens > 0 && this.contextMax > 0) {
-      const used = Math.round(this.contextTokens / 1000) + 'K';
-      const max = Math.round(this.contextMax / 1000) + 'K';
-      promptAction.showToast({ message: '上下文用量 ' + used + ' / ' + max + '，刷新中…', duration: 1500 });
-    }
     this.refreshStatus();
   }
 
@@ -316,69 +310,80 @@ export struct ComposerToolbar {
       Row() {
         // 权限模式
         Row() {
-          Circle().width(6).height(6).fill(this.permissionColor())
-          Text(this.permissionLabel()).fontSize(11).fontColor('#666').margin({ left: 5 })
-          Text('▾').fontSize(9).fontColor('#999').margin({ left: 3 })
+          Circle().width(6).height(6).fill(this.permissionColor()).accessibilityLevel('no')
+          Text(this.permissionLabel()).fontSize(11)
+            .fontColor(ThemeColors.textSecondary(this.theme)).margin({ left: 5 })
+          Text('▾').fontSize(9).fontColor(ThemeColors.textTertiary(this.theme)).margin({ left: 3 })
+            .accessibilityLevel('no')
         }
-        .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-        .backgroundColor('#F2F2F2').borderRadius(10)
-        .margin({ right: 6 })
+        .height(40).alignItems(VerticalAlign.Center)
+        .padding({ left: 4, right: 12 })
+        .accessibilityLevel('yes').accessibilityText('权限模式：' + this.permissionLabel())
+        .id('composer-permission')
         .bindMenu(this.permissionMenu())
 
         // 工作目录
         if (this.cwdLabel.length > 0) {
-          Text('📁 ' + this.cwdLabel)
-            .fontSize(11).fontColor('#666')
+          Text(this.cwdLabel)
+            .fontSize(11).fontColor(ThemeColors.textSecondary(this.theme))
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
             .constraintSize({ maxWidth: 140 })
-            .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-            .backgroundColor('#F2F2F2').borderRadius(10)
-            .margin({ right: 6 })
+            .height(40).padding({ left: 4, right: 12 })
+            .accessibilityLevel('yes').accessibilityText('工作目录：' + this.cwdLabel)
+            .id('composer-cwd')
         }
 
-        // 上下文占用：接近上限时提示新开会话，避免首字延迟和渲染卡顿
+        // 上下文占用：接近上限时变色提示，避免首字延迟和渲染卡顿
         Row() {
-          Text(this.contextPercent >= 0 ? '◔ ' + this.contextPercent + '%' : '◔ --')
+          Text(this.contextPercent >= 0 ? this.contextPercent + '%' : '--')
             .fontSize(11).fontColor(this.contextColor())
           if (this.contextPercent >= 85) {
-            Text(' · 建议新会话').fontSize(11).fontColor('#E54D42')
+            Text('!').fontSize(11).fontWeight(FontWeight.Bold)
+              .fontColor(ThemeColors.dangerText(this.theme)).margin({ left: 2 })
+              .accessibilityLevel('no')
           }
         }
-        .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-        .backgroundColor(this.contextPercent >= 85 ? '#FFF1F0' : (this.contextPercent >= 70 ? '#FFF7E6' : '#F2F2F2'))
-        .borderRadius(10)
-        .margin({ right: 6 })
+        .height(40).alignItems(VerticalAlign.Center)
+        .padding({ left: 4, right: 12 })
+        .accessibilityLevel('yes')
+        .accessibilityText('上下文 ' + (this.contextPercent >= 0 ? this.contextPercent + '%' : '未知') + '，点击刷新')
+        .id('composer-context')
         .onClick(() => { this.refreshContext(); })
 
         // 模型
         Row() {
           Text(this.modelLabel.length > 0 ? this.modelLabel : '模型')
-            .fontSize(11).fontColor('#1677FF').maxLines(1)
+            .fontSize(11).fontColor(ThemeColors.primary).maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .constraintSize({ maxWidth: 170 })
-          Text('▾').fontSize(9).fontColor('#999').margin({ left: 3 })
+          Text('▾').fontSize(9).fontColor(ThemeColors.textTertiary(this.theme)).margin({ left: 3 })
+            .accessibilityLevel('no')
         }
-        .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-        .backgroundColor('#E8F4FF').borderRadius(10)
-        .margin({ right: 6 })
+        .height(40).alignItems(VerticalAlign.Center)
+        .padding({ left: 4, right: 12 })
+        .accessibilityLevel('yes').accessibilityText('模型：' + (this.modelLabel.length > 0 ? this.modelLabel : '未选择'))
+        .id('composer-model')
         .bindMenu(this.modelMenu())
 
         // 思考强度
         Row() {
-          Text('强度 ' + this.effortLabel()).fontSize(11).fontColor('#666')
-          Text('▾').fontSize(9).fontColor('#999').margin({ left: 3 })
+          Text('强度 ' + this.effortLabel()).fontSize(11)
+            .fontColor(ThemeColors.textSecondary(this.theme))
+          Text('▾').fontSize(9).fontColor(ThemeColors.textTertiary(this.theme)).margin({ left: 3 })
+            .accessibilityLevel('no')
         }
-        .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-        .backgroundColor('#F2F2F2').borderRadius(10)
+        .height(40).alignItems(VerticalAlign.Center)
+        .padding({ left: 4, right: 12 })
+        .accessibilityLevel('yes').accessibilityText('思考强度：' + this.effortLabel())
+        .id('composer-effort')
         .bindMenu(this.effortMenu())
       }
       .alignItems(VerticalAlign.Center)
-      .padding({ left: 12, right: 12 })
+      .padding({ left: 12, right: 4 })
     }
     .scrollable(ScrollDirection.Horizontal)
     .scrollBar(BarState.Off)
     .width('100%')
-    .padding({ top: 6, bottom: 2 })
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(ThemeColors.card(this.theme))
   }
 }

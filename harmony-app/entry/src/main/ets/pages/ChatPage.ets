@@ -1,31 +1,38 @@
-import { MessageModel, MessageRole, ContentType, ToolUseContent } from '../models/Message';
+import { MessageModel, MessageRole, ContentType, TextContent, ToolUseContent, DeliveryState } from '../models/Message';
 import { MessageList } from '../components/MessageList';
 import { InputBar } from '../components/InputBar';
 import { ComposerToolbar } from '../components/ComposerToolbar';
 import { ToolPermissionDialog, PermissionRequest } from '../components/PermissionDialog';
 import { WebSocketService, WsEvent, WsEventHandler } from '../services/WebSocketService';
-import { ApiService } from '../services/ApiService';
+import { ApiService, MessagesPage } from '../services/ApiService';
 import { SessionService } from '../services/SessionService';
 import { HistoryStore } from '../services/HistoryStore';
 import { AuthService } from '../services/AuthService';
 import { NotificationService } from '../services/NotificationService';
 import { BackgroundTaskService } from '../services/BackgroundTaskService';
 import { BackgroundTurnWatcher } from '../services/BackgroundTurnWatcher';
+import { SessionActivityMonitor } from '../services/SessionActivityMonitor';
 import { AttachmentItem } from '../models/Attachment';
 import {
-  contentToText, mergeMessages, parseServerMessages, lastAssistantSnippet
+  contentToText, mergeMessages, parseServerMessages, lastAssistantSnippet, userDisplayText
 } from '../services/chat/ChatHistoryUtils';
+import {
+  eventConfirmsDelivery, normalizeLoadedDelivery, resolvePendingDelivery
+} from '../services/chat/SendReliability';
 import { promptAction } from '@kit.ArkUI';
 import router from '@ohos.router';
 import { Logger } from '../utils/Logger';
+import { ThemeColors } from '../utils/ThemeUtil';
 
 interface WsAttachment { type: string; name: string; data: string; mimeType: string; }
 interface WsUserMessage { type: string; content: string; attachments?: WsAttachment[]; }
 interface WsPermissionResponse { type: string; requestId: string; allowed: boolean; remember?: boolean; }
 interface WsStopMessage { type: string; }
+interface QueuedSend { localId: string; text: string; attachments: AttachmentItem[]; }
 
 @Component
 export struct ChatPage {
+  @StorageLink('theme') theme: string = 'light';
   @StorageLink('wsService') wsService: WebSocketService = new WebSocketService();
   @StorageLink('apiService') apiService: ApiService = new ApiService();
   @StorageLink('sessionService') sessionService: SessionService = new SessionService();
@@ -33,6 +40,7 @@ export struct ChatPage {
   @StorageLink('authService') authService: AuthService = new AuthService();
   @StorageLink('notificationService') notificationService: NotificationService = new NotificationService();
   @StorageLink('backgroundTaskService') bgTaskService: BackgroundTaskService = new BackgroundTaskService();
+  @StorageLink('sessionActivityMonitor') activityMonitor: SessionActivityMonitor = new SessionActivityMonitor();
   @StorageLink('appForeground') @Watch('onAppForegroundChanged') appForeground: boolean = true;
   @StorageLink('activeSessionId') @Watch('onActiveSessionChanged') activeSessionId: string = '';
   @StorageLink('chatRefresh') @Watch('onRefreshChanged') chatRefresh: number = 0;
@@ -42,6 +50,7 @@ export struct ChatPage {
   @State isLoadingMore: boolean = false;
   @State @Watch('onGeneratingChanged') isGenerating: boolean = false;
   @State hasMoreHistory: boolean = false;
+  @State queuedCount: number = 0;
   private oldestCursor: string = '';
   private historyHasMore: boolean = false;
   private permissionDialogController: CustomDialogController | null = null;
@@ -53,6 +62,11 @@ export struct ChatPage {
   private pendingResync: boolean = false;
   private turnNotified: boolean = false;
   private pageActive: boolean = true;
+  // 发送可靠性：待确认的本地消息、原文载荷（供重试）与本地排队队列
+  private activeSendId: string = '';
+  private pendingPayloads: Map<string, WsUserMessage> = new Map();
+  private queuedSends: QueuedSend[] = [];
+  private pumpTimer: number = -1;
   // 每个页面实例独立的处理器 owner：切换会话/重建页面时只清自己的监听
   private readonly wsOwner: string = 'chat-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
   private sendAt: number = 0;
@@ -64,6 +78,10 @@ export struct ChatPage {
   private syncTimer: number = -1;
   private syncPending: boolean = false;
   private readonly SYNC_THROTTLE_MS: number = 50;
+  // 兜底对账：公网 WS 推送偶尔停更，每隔 5 秒静默拉一次最新页
+  private lagPollTimer: number = -1;
+  private lagPollBusy: boolean = false;
+  private readonly LAG_POLL_MS: number = 5000;
 
   aboutToAppear(): void {
     this.pageActive = true;
@@ -72,7 +90,8 @@ export struct ChatPage {
     this.messages = [];
     this.sessionService.setMessages([]);
     this.setupWebSocketHandlers();
-    // 断线自动恢复后补拉历史，避免错过断线期间的消息
+    // 断线自动恢复后补拉历史，避免错过断线期间的消息。
+    // 生成中先记下待补拉，等本轮结束再拉；空闲时按页向前补到与本地重叠为止。
     this.wsService.setReconnectListener((sid: string): void => {
       if (!this.pageActive) { return; }
       if (!sid || sid !== this.activeSessionId) { return; }
@@ -80,7 +99,7 @@ export struct ChatPage {
       if (this.isGenerating) {
         this.pendingResync = true;
       } else {
-        this.fetchLatestHistory(sid);
+        this.fetchLatestHistory(sid, true);
       }
     });
     const initialSessionId = this.activeSessionId;
@@ -93,10 +112,34 @@ export struct ChatPage {
       this.showLocalHistory(sid, this.historyToken);
       this.connectActiveSession();
     }
+    this.startLagPoll();
+  }
+
+  private startLagPoll(): void {
+    if (this.lagPollTimer !== -1) { return; }
+    this.lagPollTimer = setInterval((): void => {
+      this.pollLatestIfNeeded();
+    }, this.LAG_POLL_MS);
+  }
+
+  /** 5 秒兜底：WS 推送停更时仍能对账到最新消息；避免与翻页/首屏加载并发。 */
+  private async pollLatestIfNeeded(): Promise<void> {
+    if (!this.pageActive || !this.appForeground || !this.activeSessionId) { return; }
+    if (this.lagPollBusy || this.isLoadingHistory || this.isLoadingMore) { return; }
+    this.lagPollBusy = true;
+    try {
+      await this.fetchLatestHistory(this.activeSessionId, false);
+    } finally {
+      this.lagPollBusy = false;
+    }
   }
 
   aboutToDisappear(): void {
     this.pageActive = false;
+    if (this.lagPollTimer !== -1) { clearInterval(this.lagPollTimer); this.lagPollTimer = -1; }
+    if (this.pumpTimer !== -1) { clearTimeout(this.pumpTimer); this.pumpTimer = -1; }
+    // 排队消息还没发出：退回输入框，避免离开后继续发送
+    this.restoreQueuedToComposer('');
     this.cancelScheduledSync();
     // 离开页面时结束未决权限请求，避免服务端一直等待
     this.clearPermissionTimer();
@@ -123,6 +166,9 @@ export struct ChatPage {
     this.currentTurnAssistantId = '';
     this.isGenerating = false;
     this.pendingResync = false;
+    this.restoreQueuedToComposer('排队消息已退回');
+    this.activeSendId = '';
+    this.pendingPayloads.clear();
     // 切会话先清空，避免旧消息在新历史加载完成前留在屏幕上
     this.messages = [];
     this.sessionService.setMessages([]);
@@ -161,6 +207,10 @@ export struct ChatPage {
     this.permissionDialogVisible = false;
     if (this.permissionDialogController) { this.permissionDialogController.close(); }
     this.isGenerating = false;
+    this.queuedSends = [];
+    this.queuedCount = 0;
+    this.activeSendId = '';
+    this.pendingPayloads.clear();
     this.wsService.disconnect();
     this.wsService.clearHandlers(this.wsOwner);
     this.sessionService.setCurrentSessionId('');
@@ -189,7 +239,6 @@ export struct ChatPage {
     this.currentTurnAssistantId = '';
     this.isGenerating = false;
     this.connectActiveSession();
-    promptAction.showToast({ message: '已刷新', duration: 1200 });
   }
 
   private async connectActiveSession(): Promise<void> {
@@ -229,7 +278,8 @@ export struct ChatPage {
       return;
     }
     const chosenHost: string = this.apiService.getCurrentHost();
-    const origin = 'http://' + chosenHost + ':' + config.port;
+    const scheme: string = config.scheme === 'https' ? 'https' : 'http';
+    const origin = scheme + '://' + chosenHost + (scheme === 'https' ? '' : (':' + config.port));
     AppStorage.setOrCreate('pcActiveHost', chosenHost);
     AppStorage.setOrCreate('pcReachable', true);
     this.sessionService.setCurrentSessionId(sid);
@@ -289,10 +339,19 @@ export struct ChatPage {
 
     this.onWs('session_state', (event: WsEvent) => {
       const turnState = event.turnState as string;
+      const wasGenerating = this.isGenerating;
       this.isGenerating = turnState === 'running';
       if (turnState === 'running') {
         this.turnNotified = false;
+        this.activityMonitor.markRunning(this.activeSessionId);
         this.logFirstEvent('session_state');
+      } else {
+        this.activityMonitor.markIdle(this.activeSessionId);
+        if (wasGenerating) {
+          // 断线期间本轮已结束：sync_state 只回 session_state、不会补发 status idle，
+          // 必须在这里收尾并触发历史对账，否则 pendingResync 会一直挂着。
+          this.finalizeTurn();
+        }
       }
     });
 
@@ -300,7 +359,10 @@ export struct ChatPage {
       const state = event.state as string;
       this.isGenerating = state !== 'idle';
       if (state === 'idle') { this.finalizeTurn(); }
-      else { this.logFirstEvent('status'); }
+      else {
+        this.activityMonitor.markRunning(this.activeSessionId);
+        this.logFirstEvent('status');
+      }
     });
 
     this.onWs('content_start', (event: WsEvent) => {
@@ -389,12 +451,22 @@ export struct ChatPage {
       this.currentTurnAssistantId = '';
       this.flushSync();
       this.persistCurrent();
+      this.activityMonitor.markIdle(this.activeSessionId);
       this.maybeNotifyTurnComplete();
       this.runPendingResync();
+      this.pumpQueueSoon();
     });
 
     this.onWs('error', (event: WsEvent) => {
       this.isGenerating = false;
+      this.activityMonitor.markIdle(this.activeSessionId);
+      // 发送后立即报错：把待确认消息标成失败（不自动重发，等用户点按）
+      if (this.activeSendId) {
+        const failedId = this.activeSendId;
+        this.activeSendId = '';
+        const pending = this.sessionService.getMessageById(failedId);
+        if (pending) { pending.setDelivery(DeliveryState.FAILED); }
+      }
       const msg = new MessageModel(MessageRole.SYSTEM);
       msg.appendText((event.message as string) ?? '发生错误，请重试');
       this.sessionService.addMessage(msg);
@@ -424,6 +496,16 @@ export struct ChatPage {
         AppStorage.setOrCreate('sessionsRefresh', Date.now());
       }
     });
+
+    // 服务端没有 user_message ACK：本轮任一事件到达即视为该条已被接受
+    this.onWs('*', (event: WsEvent) => {
+      if (!this.activeSendId) { return; }
+      const type = event.type as string;
+      if (eventConfirmsDelivery(type, event)) {
+        this.logFirstEvent(type);
+        this.confirmActiveSend();
+      }
+    });
   }
 
   private finalizeTurn(): void {
@@ -432,10 +514,13 @@ export struct ChatPage {
     this.currentTurnAssistantId = '';
     this.flushSync();
     this.persistCurrent();
+    this.activityMonitor.markIdle(this.activeSessionId);
     // 一轮结束后刷新列表的消息数/时间
     AppStorage.setOrCreate('sessionsRefresh', Date.now());
     this.maybeNotifyTurnComplete();
     this.runPendingResync();
+    // 有排队消息时，本轮结束后自动发送下一条
+    this.pumpQueueSoon();
   }
 
   /** 回复完成且 App 在后台时发通知（手表通过系统通知镜像接收） */
@@ -470,7 +555,7 @@ export struct ChatPage {
   private runPendingResync(): void {
     if (!this.pendingResync) { return; }
     this.pendingResync = false;
-    if (this.activeSessionId) { this.fetchLatestHistory(this.activeSessionId); }
+    if (this.activeSessionId) { this.fetchLatestHistory(this.activeSessionId, true); }
   }
 
   private ensureAssistantMessage(): MessageModel {
@@ -544,6 +629,8 @@ export struct ChatPage {
       if (!this.pageActive || token !== this.historyToken) { return; }
       if (local.length === 0 || this.messages.length > 0) { return; }
       local.sort((a: MessageModel, b: MessageModel): number => a.timestamp - b.timestamp);
+      // queued 是不可能已发出的本地状态（进程被杀/页面销毁后残留）：降级为失败，交给用户重试
+      normalizeLoadedDelivery(local);
       this.sessionService.setMessages(local);
       this.syncMessages();
       this.isLoadingHistory = false;
@@ -553,31 +640,82 @@ export struct ChatPage {
     }
   }
 
-  /** 只拉最新一页，和本地缓存增量合并；更早的分页由滚动到顶部时按需加载 */
-  private async fetchLatestHistory(sessionId: string): Promise<void> {
+  private hasServerIdOverlap(remote: MessageModel[]): boolean {
+    const localIds = new Set<string>();
+    for (const m of this.sessionService.getMessages()) {
+      if (m.serverId) { localIds.add(m.serverId); }
+    }
+    if (localIds.size === 0) { return false; }
+    for (const m of remote) {
+      if (m.serverId && localIds.has(m.serverId)) { return true; }
+    }
+    return false;
+  }
+
+  /** 用远端历史对账本地 sending 消息；sent 后清掉待确认状态，failed 保留载荷供重试 */
+  private reconcileDeliveries(remote: MessageModel[], isGenerating: boolean): void {
+    const local = this.sessionService.getMessages();
+    const resolutions = resolvePendingDelivery(local, remote, isGenerating);
+    if (resolutions.length === 0) { return; }
+    for (const r of resolutions) {
+      const m = this.sessionService.getMessageById(r.id);
+      if (!m) { continue; }
+      if (r.state === DeliveryState.SENT) {
+        m.setDelivery(DeliveryState.SENT);
+        this.pendingPayloads.delete(r.id);
+        if (this.activeSendId === r.id) { this.activeSendId = ''; }
+      } else if (r.state === DeliveryState.FAILED) {
+        m.setDelivery(DeliveryState.FAILED);
+        if (this.activeSendId === r.id) {
+          this.activeSendId = '';
+          this.isGenerating = false;
+        }
+      }
+    }
+  }
+
+  /**
+   * 和本地缓存增量合并。
+   * deep=true（断线重连）时向前补拉最多 4 页，直到与本地缓存出现 serverId 重叠，
+   * 避免断线期间超过一页的消息永久缺失。更早的分页仍由滚动到顶部按需加载。
+   */
+  private async fetchLatestHistory(sessionId: string, deep: boolean = false): Promise<void> {
     if (!sessionId) { return; }
     const token = this.historyToken;
     const t0 = Date.now();
     this.sessionService.setCurrentSessionId(sessionId);
     try {
-      const page = await this.apiService.getMessagesPage(sessionId);
+      let page: MessagesPage = await this.apiService.getMessagesPage(sessionId);
+      let remote: MessageModel[] = page.messages.length > 0 ? parseServerMessages(page.messages) : [];
+      let cursor: string = page.nextCursor;
+      let hasMore: boolean = page.hasMore && cursor.length > 0;
+      let pagesFetched = 1;
+      while (deep && pagesFetched < 4 && hasMore && !this.hasServerIdOverlap(remote)) {
+        page = await this.apiService.getMessagesPage(sessionId, cursor);
+        const older = page.messages.length > 0 ? parseServerMessages(page.messages) : [];
+        remote = older.concat(remote);
+        cursor = page.nextCursor;
+        hasMore = page.hasMore && cursor.length > 0;
+        pagesFetched++;
+      }
       if (!this.pageActive || token !== this.historyToken) { return; }
-      const remote = page.messages.length > 0 ? parseServerMessages(page.messages) : [];
+      // 先对账再 merge：本地乐观消息被远端同文消息替换后，仍能正确清掉 sending/failed
+      this.reconcileDeliveries(remote, this.isGenerating);
       const before = this.sessionService.getMessages();
       const merged = remote.length > 0 ? mergeMessages(before, remote) : before;
       this.sessionService.setMessages(merged);
       this.syncMessages();
       // 已经向上翻过页时保留原来的游标，避免重连把翻页位置重置到最新
       if (!this.oldestCursor) {
-        this.oldestCursor = page.nextCursor;
-        this.historyHasMore = page.hasMore && page.nextCursor.length > 0;
+        this.oldestCursor = cursor;
+        this.historyHasMore = hasMore;
         this.hasMoreHistory = this.historyHasMore;
       }
-      if (remote.length > 0 && merged.length > before.length) {
+      if (remote.length > 0 && merged.length !== before.length) {
         this.historyStore.saveMessages(sessionId, merged);
       }
-      Logger.info('remote latest merged: +' + Math.max(0, merged.length - before.length) +
-        ' msgs in ' + (Date.now() - t0) + 'ms');
+      Logger.info('remote merged: +' + Math.max(0, merged.length - before.length) +
+        ' msgs pages=' + pagesFetched + ' in ' + (Date.now() - t0) + 'ms');
     } catch (err) {
       Logger.warn('fetchLatestHistory failed: ' + (err as Error).message);
       // 首屏没有任何缓存时，静默失败会让用户只看到空白页，明确提示一次
@@ -597,8 +735,27 @@ export struct ChatPage {
     if (sid) { await this.historyStore.saveMessages(sid, this.sessionService.getMessages()); }
   }
 
+  private buildDisplayText(text: string, attachments: AttachmentItem[]): string {
+    let display = text;
+    for (const a of attachments) {
+      const tag = a.type === 'image' ? '[图片] ' : '[文件] ';
+      display = display.length > 0 ? display + '\n' + tag + a.name : tag + a.name;
+    }
+    return display;
+  }
+
+  private buildUserPayload(text: string, attachments: AttachmentItem[]): WsUserMessage {
+    if (attachments.length > 0) {
+      const atts: WsAttachment[] = [];
+      for (const a of attachments) {
+        atts.push({ type: a.type, name: a.name, data: a.data, mimeType: a.mimeType });
+      }
+      return { type: 'user_message', content: text, attachments: atts };
+    }
+    return { type: 'user_message', content: text };
+  }
+
   private handleSendMessage(text: string, attachments: AttachmentItem[]): void {
-    if (this.isGenerating) { return; }
     const sid = this.sessionService.getCurrentSessionId();
     if (!sid) { return; }
     // 断线时发送会静默失败（消息只留在本地），先提示并触发重连
@@ -607,41 +764,180 @@ export struct ChatPage {
       promptAction.showToast({ message: '连接已断开，正在重连，请稍后重试', duration: 2000 });
       return;
     }
+    const display = this.buildDisplayText(text, attachments);
+    const msg = this.sessionService.addUserMessage(display);
+    if (this.isGenerating) {
+      // 生成中排队：仅本地排队，当前回合结束后自动发送（与服务端 H5 行为一致）
+      msg.setDelivery(DeliveryState.QUEUED);
+      this.queuedSends.push({ localId: msg.id, text: text, attachments: attachments });
+      this.queuedCount = this.queuedSends.length;
+      this.syncMessages();
+      this.persistCurrent();
+      promptAction.showToast({ message: '已排队', duration: 1500 });
+      return;
+    }
+    this.dispatchPayload(this.buildUserPayload(text, attachments), msg);
+  }
+
+  /** 真正发出消息：记录待确认状态与原文载荷；flush 失败直接标失败，服务端未确认由对账兜底 */
+  private dispatchPayload(payload: WsUserMessage, localMsg: MessageModel): void {
     this.currentTurnAssistantId = '';
     this.turnNotified = false;
     // 立刻置为生成中：这样用户发完马上切后台时，onBackground 能及时启动连续任务，
     // 保证完成事件和通知不会被系统冻结
     this.isGenerating = true;
-
-    // 本地展示时把附件名附在消息里
-    let display = text;
-    for (const a of attachments) {
-      const tag = a.type === 'image' ? '[图片] ' : '[文件] ';
-      display = display.length > 0 ? display + '\n' + tag + a.name : tag + a.name;
-    }
-    this.sessionService.addUserMessage(display);
+    this.activityMonitor.markRunning(this.activeSessionId);
+    localMsg.setDelivery(DeliveryState.SENDING);
+    this.activeSendId = localMsg.id;
+    this.pendingPayloads.set(localMsg.id, payload);
     this.syncMessages();
     this.persistCurrent();
 
     this.sendAt = Date.now();
     this.firstEventLogged = false;
-    Logger.warn('[CC] user_message send start at ' + this.sendAt + ' len=' + text.length);
-    if (attachments.length > 0) {
-      const atts: WsAttachment[] = [];
-      for (const a of attachments) {
-        atts.push({ type: a.type, name: a.name, data: a.data, mimeType: a.mimeType });
-      }
-      const payload: WsUserMessage = { type: 'user_message', content: text, attachments: atts };
-      this.wsService.send(payload);
-    } else {
-      const payload: WsUserMessage = { type: 'user_message', content: text };
-      this.wsService.send(payload);
+    Logger.warn('[CC] user_message send start at ' + this.sendAt + ' len=' + payload.content.length);
+    this.wsService.sendWithResult(payload).then((ok: boolean): void => {
+      if (ok || !this.pageActive) { return; }
+      if (this.activeSendId !== localMsg.id) { return; }
+      this.markSendFailed(localMsg.id);
+      promptAction.showToast({ message: '发送失败，点按消息可重试', duration: 2000 });
+    });
+  }
+
+  private markSendFailed(localId: string): void {
+    const m = this.sessionService.getMessageById(localId);
+    if (m) { m.setDelivery(DeliveryState.FAILED); }
+    if (this.activeSendId === localId) { this.activeSendId = ''; }
+    this.isGenerating = false;
+    this.activityMonitor.markIdle(this.activeSessionId);
+    this.syncMessages();
+    this.persistCurrent();
+  }
+
+  /** 本轮任一事件到达：确认前面的 user_message 已被服务端接受 */
+  private confirmActiveSend(): void {
+    if (!this.activeSendId) { return; }
+    const m = this.sessionService.getMessageById(this.activeSendId);
+    if (m) { m.setDelivery(DeliveryState.SENT); }
+    this.pendingPayloads.delete(this.activeSendId);
+    this.activeSendId = '';
+    this.syncMessages();
+    this.persistCurrent();
+  }
+
+  private pumpQueueSoon(): void {
+    if (this.pumpTimer !== -1) { clearTimeout(this.pumpTimer); }
+    this.pumpTimer = setTimeout(() => {
+      this.pumpTimer = -1;
+      this.pumpQueue();
+    }, 150);
+  }
+
+  private pumpQueue(): void {
+    if (!this.pageActive || this.isGenerating || this.queuedSends.length === 0) { return; }
+    if (!this.wsService.getIsConnected()) { return; }
+    const next = this.queuedSends.shift();
+    this.queuedCount = this.queuedSends.length;
+    if (!next) { return; }
+    const m = this.sessionService.getMessageById(next.localId);
+    if (!m) {
+      this.pumpQueue();
+      return;
     }
+    this.dispatchPayload(this.buildUserPayload(next.text, next.attachments), m);
+  }
+
+  /** 停止/离开/切会话：排队消息退回输入框（不自动发送） */
+  private restoreQueuedToComposer(toastMessage: string): void {
+    if (this.queuedSends.length === 0) { return; }
+    const ids = new Set<string>();
+    const texts: string[] = [];
+    for (const q of this.queuedSends) {
+      ids.add(q.localId);
+      if (q.text.trim().length > 0) { texts.push(q.text); }
+    }
+    this.queuedSends = [];
+    this.queuedCount = 0;
+    this.sessionService.setMessages(this.sessionService.getMessages().filter(m => !ids.has(m.id)));
+    if (texts.length > 0) { AppStorage.setOrCreate('composerPrefill', texts.join('\n\n')); }
+    this.syncMessages();
+    this.persistCurrent();
+    if (toastMessage) { promptAction.showToast({ message: toastMessage, duration: 1800 }); }
+  }
+
+  /** 用户主动取消排队：直接移除排队气泡 */
+  private cancelQueued(): void {
+    if (this.queuedSends.length === 0) { return; }
+    const ids = new Set<string>();
+    for (const q of this.queuedSends) { ids.add(q.localId); }
+    this.queuedSends = [];
+    this.queuedCount = 0;
+    this.sessionService.setMessages(this.sessionService.getMessages().filter(m => !ids.has(m.id)));
+    this.syncMessages();
+    this.persistCurrent();
   }
 
   private handleStop(): void {
+    // 停止当前回合时，排队消息不再自动发送，退回输入框
+    this.restoreQueuedToComposer('已停止');
     const payload: WsStopMessage = { type: 'stop_generation' };
     this.wsService.send(payload);
+  }
+
+  private hasAttachmentMarker(m: MessageModel): boolean {
+    for (const c of m.contents) {
+      if (c.type !== ContentType.TEXT) { continue; }
+      const lines = (c as TextContent).text.split('\n');
+      for (const line of lines) {
+        const t = line.trim();
+        if (t.indexOf('[图片]') === 0 || t.indexOf('[文件]') === 0) { return true; }
+      }
+    }
+    return false;
+  }
+
+  /** 点按失败消息重试：先核对远端，确认未送达才重发，避免重复 */
+  private onRetryMessage(localId: string): void {
+    const m = this.sessionService.getMessageById(localId);
+    if (!m || m.delivery !== DeliveryState.FAILED) { return; }
+    if (!this.wsService.getIsConnected()) {
+      this.wsService.ensureAlive();
+      promptAction.showToast({ message: '连接已断开，正在重连', duration: 1800 });
+      return;
+    }
+    const payload = this.pendingPayloads.get(localId);
+    if (!payload) {
+      if (this.hasAttachmentMarker(m)) {
+        promptAction.showToast({ message: '附件消息未保留，请在输入框重新发送', duration: 2200 });
+        return;
+      }
+      const text = userDisplayText(m);
+      if (!text) { return; }
+      this.verifyThenRetry(m, { type: 'user_message', content: text });
+      return;
+    }
+    this.verifyThenRetry(m, payload);
+  }
+
+  private verifyThenRetry(m: MessageModel, payload: WsUserMessage): void {
+    const sid = this.sessionService.getCurrentSessionId();
+    if (!sid) { return; }
+    this.apiService.getMessagesPage(sid).then((page: MessagesPage): void => {
+      if (!this.pageActive) { return; }
+      const remote = parseServerMessages(page.messages);
+      const res = resolvePendingDelivery([m], remote, false);
+      if (res.length > 0 && res[0].state === DeliveryState.SENT) {
+        m.setDelivery(DeliveryState.SENT);
+        this.pendingPayloads.delete(m.id);
+        this.syncMessages();
+        this.persistCurrent();
+        return;
+      }
+      this.dispatchPayload(payload, m);
+    }).catch((err: Error): void => {
+      Logger.warn('retry verify failed: ' + err.message);
+      if (this.pageActive) { this.dispatchPayload(payload, m); }
+    });
   }
 
   /** 滚动到顶部时加载更早的一页历史 */
@@ -684,7 +980,7 @@ export struct ChatPage {
       alignment: DialogAlignment.Bottom,
       customStyle: true,
       autoCancel: false,
-      maskColor: 'rgba(0,0,0,0.6)'
+      maskColor: ThemeColors.dialogMask('light')
     });
     this.permissionDialogVisible = true;
     this.permissionDialogController.open();
@@ -715,6 +1011,10 @@ export struct ChatPage {
     if (this.appForeground && this.pageActive && this.pendingPermissionRequest && !this.permissionDialogVisible) {
       this.showPermissionDialog();
     }
+    // 后台期间本轮已结束：回前台补发本地排队消息
+    if (this.appForeground && this.pageActive && !this.isGenerating && this.queuedSends.length > 0) {
+      this.pumpQueueSoon();
+    }
   }
 
   private sendPermissionDecision(requestId: string, allowed: boolean, remember: boolean): void {
@@ -732,7 +1032,8 @@ export struct ChatPage {
       MessageList({
         messages: $messages,
         isLoading: this.isLoadingHistory || this.isLoadingMore,
-        onLoadMore: (): void => { this.handleLoadMore(); }
+        onLoadMore: (): void => { this.handleLoadMore(); },
+        onRetryMessage: (id: string): void => { this.onRetryMessage(id); }
       })
 
       if (this.activeSessionId) {
@@ -743,14 +1044,15 @@ export struct ChatPage {
       }
 
       InputBar({
-        sessionId: this.sessionService.getCurrentSessionId(),
         isGenerating: this.isGenerating,
+        queuedCount: this.queuedCount,
         onSendMessage: (message: string, attachments: AttachmentItem[]): void => {
           this.handleSendMessage(message, attachments);
         },
-        onStopGeneration: (): void => { this.handleStop(); }
+        onStopGeneration: (): void => { this.handleStop(); },
+        onCancelQueued: (): void => { this.cancelQueued(); }
       })
     }
-    .width('100%').height('100%').backgroundColor('#F0F0F0')
+    .width('100%').height('100%').backgroundColor(ThemeColors.chatBg(this.theme))
   }
 }

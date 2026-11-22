@@ -15,9 +15,13 @@ export class Constants {
 
   // Preferences
   static readonly PREFERENCES_NAME: string = 'cc_haha_prefs';
+  /** 旧版明文 token 键；新版本迁移到 Asset Store 后删除 */
   static readonly KEY_TOKEN: string = 'auth_token';
+  /** Asset Store 中保存 H5 token 的别名 */
+  static readonly ASSET_ALIAS_TOKEN: string = 'cc_haha_h5_token';
   static readonly KEY_HOST: string = 'connection_host';
   static readonly KEY_PORT: string = 'connection_port';
+  static readonly KEY_SCHEME: string = 'connection_scheme';
   static readonly KEY_HOSTNAME: string = 'connection_hostname';
   static readonly KEY_ORIGIN: string = 'connection_origin';
   static readonly KEY_HOST_ALTS: string = 'connection_host_alts';
@@ -30,20 +34,5 @@ export class Constants {
   static readonly KEY_CURRENT_SESSION_ID: string = 'current_session_id';
 
   // App info
-  static readonly APP_VERSION: string = '1.0.1';
-}
-
-export class Colors {
-  static readonly primary: string = '#1677FF';
-  static readonly primaryLight: string = '#E6F4FF';
-  static readonly success: string = '#52C41A';
-  static readonly warning: string = '#FAAD14';
-  static readonly error: string = '#FF4D4F';
-  static readonly bgLight: string = '#FFFFFF';
-  static readonly bgDark: string = '#141414';
-  static readonly text: string = '#1F1F1F';
-  static readonly textSecondary: string = '#8C8C8C';
-  static readonly border: string = '#F0F0F0';
-  static readonly userBubble: string = '#1677FF';
-  static readonly assistantBubble: string = '#F5F5F5';
+  static readonly APP_VERSION: string = '1.1.0';
 }

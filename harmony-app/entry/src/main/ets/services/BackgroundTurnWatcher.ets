@@ -3,6 +3,7 @@ import { ApiService } from './ApiService';
 import { NotificationService } from './NotificationService';
 import { BackgroundTaskService } from './BackgroundTaskService';
 import { AuthService } from './AuthService';
+import { SessionActivityMonitor } from './SessionActivityMonitor';
 import { parseServerMessages, lastAssistantSnippet } from './chat/ChatHistoryUtils';
 import { Logger } from '../utils/Logger';
 
@@ -23,13 +24,16 @@ export class BackgroundTurnWatcher {
   private notificationService: NotificationService;
   private authService: AuthService;
   private bgTaskService: BackgroundTaskService;
+  private activityMonitor: SessionActivityMonitor;
 
   constructor(apiService: ApiService, notificationService: NotificationService,
-              authService: AuthService, bgTaskService: BackgroundTaskService) {
+              authService: AuthService, bgTaskService: BackgroundTaskService,
+              activityMonitor: SessionActivityMonitor) {
     this.apiService = apiService;
     this.notificationService = notificationService;
     this.authService = authService;
     this.bgTaskService = bgTaskService;
+    this.activityMonitor = activityMonitor;
   }
 
   isWatching(sessionId: string): boolean {
@@ -48,6 +52,7 @@ export class BackgroundTurnWatcher {
         Logger.warn('[BG] watcher connect failed: ' + error.message);
         this.stop();
       });
+    this.activityMonitor.markRunning(sessionId);
     this.timer = setTimeout((): void => { this.stop(); }, MAX_WATCH_MS);
     Logger.info('[BG] watching session ' + sessionId.substring(0, 8));
   }
@@ -79,6 +84,7 @@ export class BackgroundTurnWatcher {
     const title: string = this.title;
     if (!sid) { return; }
     this.stop();
+    this.activityMonitor.markIdle(sid);
     try {
       if (!(await this.authService.getNotifyOnComplete())) { return; }
       let body: string = '回复已完成，点击查看';
